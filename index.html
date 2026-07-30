@@ -383,14 +383,20 @@ function render(){
 --------------------------------------------------------- */
 let invSearch = '';
 let invZoneFilter = '';
+let invNuanceFilter = '';
+let invEpFilter = '';
 
 function renderInventaire(){
   const view = document.getElementById('view');
   const filtered = toles.filter(t=>{
     const matchSearch = !invSearch || (t.ref+t.matiere+(t.nuance||'')).toLowerCase().includes(invSearch.toLowerCase());
     const matchZone = !invZoneFilter || t.zone === invZoneFilter;
-    return matchSearch && matchZone;
+    const matchNuance = !invNuanceFilter || (t.nuance||'') === invNuanceFilter;
+    const matchEp = !invEpFilter || String(t.epaisseur) === invEpFilter;
+    return matchSearch && matchZone && matchNuance && matchEp;
   });
+  const nuancesDispo = [...new Set(toles.map(t=>t.nuance).filter(Boolean))].sort();
+  const epaisseursDispo = [...new Set(toles.map(t=>t.epaisseur))].sort((a,b)=>a-b);
 
   view.innerHTML = `
     <header class="page">
@@ -407,6 +413,14 @@ function renderInventaire(){
       <select id="inv-zone-filter">
         <option value="">Toutes les zones</option>
         ${zones.map(z=>`<option value="${z.code}" ${invZoneFilter===z.code?'selected':''}>${z.code} — ${escapeHtml(z.nom)}</option>`).join('')}
+      </select>
+      <select id="inv-nuance-filter">
+        <option value="">Toutes les nuances</option>
+        ${nuancesDispo.map(n=>`<option value="${escapeHtml(n)}" ${invNuanceFilter===n?'selected':''}>${escapeHtml(n)}</option>`).join('')}
+      </select>
+      <select id="inv-ep-filter">
+        <option value="">Toutes les épaisseurs</option>
+        ${epaisseursDispo.map(ep=>`<option value="${ep}" ${invEpFilter===String(ep)?'selected':''}>${ep} mm</option>`).join('')}
       </select>
     </div>
 
@@ -456,6 +470,8 @@ function renderInventaire(){
   document.getElementById('add-tole-btn').onclick = ()=> openToleModal();
   document.getElementById('inv-search').oninput = (e)=>{ invSearch = e.target.value; renderInventaire(); };
   document.getElementById('inv-zone-filter').onchange = (e)=>{ invZoneFilter = e.target.value; renderInventaire(); };
+  document.getElementById('inv-nuance-filter').onchange = (e)=>{ invNuanceFilter = e.target.value; renderInventaire(); };
+  document.getElementById('inv-ep-filter').onchange = (e)=>{ invEpFilter = e.target.value; renderInventaire(); };
 
   view.querySelectorAll('[data-qty]').forEach(b=>{
     b.onclick = async ()=>{
