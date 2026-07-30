@@ -817,31 +817,50 @@ function onQrPhotoSelected(e){
 
   const img = new Image();
   const url = URL.createObjectURL(file);
+
   img.onload = ()=>{
     URL.revokeObjectURL(url);
-    const canvas = document.createElement('canvas');
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const code = jsQR(imgData.data, imgData.width, imgData.height);
-    if(code && code.data){
-      handleScanCode(code.data.trim().toUpperCase());
-    }else{
-      vf.innerHTML = `
-        <div class="idle">
-          Aucun QR code détecté sur cette photo.<br>Réessayez, en cadrant bien l'étiquette et avec un bon éclairage.
-          <button class="btn primary small" id="retry-scan" style="margin-top:10px">Reprendre une photo</button>
-        </div>`;
-      document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
+    try{
+      // Redimensionner : les photos de téléphone (10-12 Mpx) sont trop lourdes
+      // à analyser directement et peuvent bloquer silencieusement le décodage.
+      const MAX_DIM = 1400;
+      const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, w, h);
+
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+
+      if(code && code.data){
+        handleScanCode(code.data.trim().toUpperCase());
+      }else{
+        showScanFailure("Aucun QR code détecté sur cette photo.<br>Réessayez en cadrant bien l'étiquette, de plus près, avec un bon éclairage.");
+      }
+    }catch(err){
+      console.error('Erreur analyse QR:', err);
+      showScanFailure("Erreur pendant l'analyse de la photo.<br>Réessayez avec une photo moins zoomée.");
     }
   };
   img.onerror = ()=>{
-    vf.innerHTML = `<div class="idle">Impossible de lire cette photo. <button class="btn primary small" id="retry-scan" style="margin-top:10px">Réessayer</button></div>`;
-    document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
+    showScanFailure("Impossible de lire cette photo.");
   };
   img.src = url;
+}
+
+function showScanFailure(message){
+  const vf = document.getElementById('viewfinder');
+  vf.innerHTML = `
+    <div class="idle">
+      ${message}
+      <button class="btn primary small" id="retry-scan" style="margin-top:10px">Reprendre une photo</button>
+    </div>`;
+  document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
 }
 
 function handleScanCode(code){
