@@ -809,12 +809,47 @@ function renderScanner(){
   });
 }
 
+async function tryNativeBarcodeDetector(img){
+  if(!('BarcodeDetector' in window)) return null;
+  try{
+    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    const results = await detector.detect(img);
+    if(results && results.length && results[0].rawValue) return results[0].rawValue;
+  }catch(err){
+    console.warn('BarcodeDetector indisponible ou en échec, repli sur jsQR:', err);
+  }
+  return null;
+}
+
 function decodeQrFromCanvas(ctx, w, h){
   const imgData = ctx.getImageData(0, 0, w, h);
   return jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
 }
 
-function onQrPhotoSelected(e){
+function tryDecodeAtScale(img, maxDim){
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  const scale = Math.min(1, maxDim / Math.max(nw, nh));
+  const w = Math.max(1, Math.round(nw * scale));
+  const h = Math.max(1, Math.round(nh * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  return decodeQrFromCanvas(ctx, w, h);
+}
+
+function tryDecodeCropped(img, cropFraction, targetSize){
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  const cropW = nw * cropFraction, cropH = nh * cropFraction;
+  const sx = (nw - cropW) / 2, sy = (nh - cropH) / 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = targetSize; canvas.height = targetSize;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, sx, sy, cropW, cropH, 0, 0, targetSize, targetSize);
+  return decodeQrFromCanvas(ctx, targetSize, targetSize);
+}
+
+async function onQrPhotoSelected(e){
   const file = e.target.files && e.target.files[0];
   if(!file) return;
   const vf = document.getElementById('viewfinder');
@@ -823,29 +858,31 @@ function onQrPhotoSelected(e){
   const img = new Image();
   const url = URL.createObjectURL(file);
 
-  img.onload = ()=>{
+  img.onload = async ()=>{
     URL.revokeObjectURL(url);
     try{
+      // 0. Détecteur natif du navigateur (même moteur que l'appareil photo du téléphone) — le plus fiable
+      const native = await tryNativeBarcodeDetector(img);
+      if(native){
+        handleScanCode(native.trim().toUpperCase());
+        return;
+      }
+
       const nw = img.naturalWidth, nh = img.naturalHeight;
-      // Plusieurs tentatives à des résolutions différentes : une image trop réduite
-      // rend les petits carrés du QR illisibles, une image trop grande peut bloquer
-      // le décodage. On essaie donc plusieurs tailles jusqu'à ce que ça fonctionne.
-      const attempts = [2000, 1200, Math.max(nw, nh), 800];
       let code = null;
 
-      for(const maxDim of attempts){
-        const scale = Math.min(1, maxDim / Math.max(nw, nh));
-        const w = Math.max(1, Math.round(nw * scale));
-        const h = Math.max(1, Math.round(nh * scale));
-
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0, w, h);
-
-        code = decodeQrFromCanvas(ctx, w, h);
+      // 1. Repli : jsQR sur l'image entière, à plusieurs résolutions
+      for(const maxDim of [2000, 1200, Math.max(nw, nh), 800]){
+        code = tryDecodeAtScale(img, maxDim);
         if(code && code.data) break;
+      }
+
+      // 2. Repli : recadrage automatique sur le centre, agrandi
+      if(!code || !code.data){
+        for(const cropFraction of [0.6, 0.4, 0.25, 0.15]){
+          code = tryDecodeCropped(img, cropFraction, 900);
+          if(code && code.data) break;
+        }
       }
 
       if(code && code.data){
