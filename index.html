@@ -400,6 +400,7 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{
     document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
+    stopLiveScanner();
     currentTab = btn.dataset.tab;
     render();
   });
@@ -770,15 +771,16 @@ function renderScanner(){
       <div>
         <div class="eyebrow">Localisation</div>
         <h1>Scanner une zone</h1>
-        <div class="lede">Prenez une photo de l'étiquette QR collée sur le rack pour afficher son contenu ou y affecter une tôle.</div>
+        <div class="lede">Scannez en direct avec la caméra, ou prenez une photo de l'étiquette QR du rack.</div>
       </div>
     </header>
 
     <div class="scanner-wrap">
       <div class="viewfinder" id="viewfinder">
         <div class="idle" id="scan-idle">
-          <div>📷 Prenez une photo de l'étiquette QR de la zone.</div>
-          <button class="btn primary" id="start-scan">Prendre une photo</button>
+          <div>Choisissez une méthode pour lire l'étiquette QR de la zone.</div>
+          <button class="btn primary" id="start-live">🔴 Scanner en direct</button>
+          <button class="btn" id="start-scan">📷 Prendre une photo</button>
           <input type="file" accept="image/*" capture="environment" id="qr-photo-input" style="display:none">
         </div>
       </div>
@@ -798,6 +800,7 @@ function renderScanner(){
     </div>
   `;
 
+  document.getElementById('start-live').onclick = startLiveScanner;
   document.getElementById('start-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
   document.getElementById('qr-photo-input').addEventListener('change', onQrPhotoSelected);
   document.getElementById('manual-go').onclick = ()=>{
@@ -807,6 +810,71 @@ function renderScanner(){
   document.getElementById('manual-code').addEventListener('keydown', e=>{
     if(e.key==='Enter'){ document.getElementById('manual-go').click(); }
   });
+}
+
+let scanStream = null;
+let liveScanTimer = null;
+let liveScanActive = false;
+
+async function startLiveScanner(){
+  const vf = document.getElementById('viewfinder');
+  vf.innerHTML = `<div class="idle">Ouverture de la caméra…</div>`;
+  try{
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  }catch(e){
+    console.error(e);
+    vf.innerHTML = `<div class="idle">Accès caméra refusé ou indisponible.<br>Utilisez plutôt "Prendre une photo" ci-dessous.</div>`;
+    return;
+  }
+  vf.innerHTML = `
+    <video id="scan-video" playsinline muted autoplay></video>
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <div class="scan-line"></div>
+  `;
+  const video = document.getElementById('scan-video');
+  video.srcObject = scanStream;
+  await video.play();
+
+  const detector = ('BarcodeDetector' in window) ? new BarcodeDetector({ formats: ['qr_code'] }) : null;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  liveScanActive = true;
+  let busy = false;
+
+  liveScanTimer = setInterval(async ()=>{
+    if(busy || !liveScanActive || video.readyState < video.HAVE_ENOUGH_DATA) return;
+    busy = true;
+    try{
+      let value = null;
+      if(detector){
+        try{
+          const results = await detector.detect(video);
+          if(results && results.length) value = results[0].rawValue;
+        }catch(err){ /* on retente avec jsQR ci-dessous sur cette même image */ }
+      }
+      if(!value){
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+        if(code && code.data) value = code.data;
+      }
+      if(value){
+        stopLiveScanner();
+        handleScanCode(value.trim().toUpperCase());
+      }
+    } finally {
+      busy = false;
+    }
+  }, 350);
+}
+
+function stopLiveScanner(){
+  liveScanActive = false;
+  if(liveScanTimer){ clearInterval(liveScanTimer); liveScanTimer = null; }
+  if(scanStream){ scanStream.getTracks().forEach(tr=>tr.stop()); scanStream = null; }
 }
 
 async function tryNativeBarcodeDetector(img){
@@ -906,18 +974,19 @@ function showScanFailure(message){
   vf.innerHTML = `
     <div class="idle">
       ${message}
-      <button class="btn primary small" id="retry-scan" style="margin-top:10px">Reprendre une photo</button>
+      <button class="btn primary small" id="retry-scan" style="margin-top:10px">Réessayer</button>
     </div>`;
-  document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
+  document.getElementById('retry-scan').onclick = renderScanner;
 }
 
 function handleScanCode(code){
+  stopLiveScanner();
   const zone = zones.find(z=>z.code === code);
   const panel = document.getElementById('scan-result');
   const vf = document.getElementById('viewfinder');
   if(vf){
-    vf.innerHTML = `<div class="idle">Code lu : <b style="color:var(--ink)">${escapeHtml(code)}</b><br><button class="btn small" id="rescan-btn" style="margin-top:8px">Reprendre une photo</button></div>`;
-    document.getElementById('rescan-btn').onclick = ()=> document.getElementById('qr-photo-input').click();
+    vf.innerHTML = `<div class="idle">Code lu : <b style="color:var(--ink)">${escapeHtml(code)}</b><br><button class="btn small" id="rescan-btn" style="margin-top:8px">Scanner à nouveau</button></div>`;
+    document.getElementById('rescan-btn').onclick = renderScanner;
   }
   if(!panel) return;
 
