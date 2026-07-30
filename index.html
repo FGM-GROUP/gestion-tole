@@ -261,6 +261,13 @@ const db = firebase.firestore();
 let serverIdSnapshots = {};
 
 const uid = () => Math.random().toString(36).slice(2,9);
+function formatDate(iso){
+  if(!iso) return '—';
+  const d = new Date(iso);
+  if(isNaN(d)) return '—';
+  const pad = n => String(n).padStart(2,'0');
+  return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 /* Référence automatique : MATIÈRE-NUANCE-ÉPAISSEURxLONGUEURxLARGEUR-SÉQUENCE */
 const MATIERE_CODES = {
@@ -296,7 +303,8 @@ async function loadData(){
         id: uid(), _fbId: d.id,
         ref: data.ref || '', matiere: data.matiere || 'Acier', nuance: data.nuance || '',
         epaisseur: Number(data.epaisseur) || 0, longueur: Number(data.longueur) || 0, largeur: Number(data.largeur) || 0,
-        qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || ''
+        qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || '',
+        dateCreation: data.dateCreation || null, dateModification: data.dateModification || null
       };
     });
     serverIdSnapshots.toles = new Set(toles.map(t=>t._fbId));
@@ -318,7 +326,9 @@ async function saveToles(){
       const fields = {
         ref: t.ref, matiere: t.matiere, nuance: t.nuance || '',
         epaisseur: t.epaisseur, longueur: t.longueur, largeur: t.largeur,
-        qte: t.qte, seuil: t.seuil, zone: t.zone || ''
+        qte: t.qte, seuil: t.seuil, zone: t.zone || '',
+        dateCreation: t.dateCreation || new Date().toISOString(),
+        dateModification: t.dateModification || new Date().toISOString()
       };
       if(t._fbId){
         await db.collection('toles').doc(t._fbId).set(fields);
@@ -410,7 +420,7 @@ function renderInventaire(){
         <thead>
           <tr>
             <th>Référence</th><th>Matière</th><th>Nuance</th><th>Dimensions</th><th>Épaisseur</th>
-            <th>Zone</th><th>Quantité</th><th></th>
+            <th>Zone</th><th>Quantité</th><th>Modifié le</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -429,6 +439,7 @@ function renderInventaire(){
                   <button data-qty="1" data-id="${t.id}" aria-label="Augmenter">+</button>
                 </div>
               </td>
+              <td class="dim">${formatDate(t.dateModification)}</td>
               <td>
                 <div class="row-actions">
                   <button class="btn ghost small" data-edit="${t.id}">Modifier</button>
@@ -450,6 +461,7 @@ function renderInventaire(){
     b.onclick = async ()=>{
       const t = toles.find(x=>x.id===b.dataset.id);
       t.qte = Math.max(0, t.qte + parseInt(b.dataset.qty));
+      t.dateModification = new Date().toISOString();
       await saveToles();
       renderInventaire();
     };
@@ -556,7 +568,14 @@ function openToleModal(existing, prefillZone){
     t.qte = parseInt(overlay.querySelector('#f-qte').value) || 0;
     t.seuil = parseInt(overlay.querySelector('#f-seuil').value) || 0;
     t.zone = overlay.querySelector('#f-zone').value;
-    if(!editing) toles.push(t);
+    const now = new Date().toISOString();
+    if(!editing){
+      t.dateCreation = now;
+      t.dateModification = now;
+      toles.push(t);
+    }else{
+      t.dateModification = now;
+    }
     await saveToles();
     overlay.remove();
     toast(editing ? 'Tôle mise à jour' : 'Tôle ajoutée');
