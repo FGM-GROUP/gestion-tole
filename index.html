@@ -275,8 +275,6 @@
 let toles = [];
 let zones = [];
 let currentTab = 'inventaire';
-let scanStream = null;
-let scanRAF = null;
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -402,7 +400,6 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{
     document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
-    stopScanner();
     currentTab = btn.dataset.tab;
     render();
   });
@@ -773,15 +770,16 @@ function renderScanner(){
       <div>
         <div class="eyebrow">Localisation</div>
         <h1>Scanner une zone</h1>
-        <div class="lede">Visez l'étiquette QR collée sur le rack pour afficher son contenu ou y affecter une tôle.</div>
+        <div class="lede">Prenez une photo de l'étiquette QR collée sur le rack pour afficher son contenu ou y affecter une tôle.</div>
       </div>
     </header>
 
     <div class="scanner-wrap">
       <div class="viewfinder" id="viewfinder">
         <div class="idle" id="scan-idle">
-          <div>La caméra n'est pas encore active.</div>
-          <button class="btn primary" id="start-scan">Démarrer le scanner</button>
+          <div>📷 Prenez une photo de l'étiquette QR de la zone.</div>
+          <button class="btn primary" id="start-scan">Prendre une photo</button>
+          <input type="file" accept="image/*" capture="environment" id="qr-photo-input" style="display:none">
         </div>
       </div>
 
@@ -800,7 +798,8 @@ function renderScanner(){
     </div>
   `;
 
-  document.getElementById('start-scan').onclick = startScanner;
+  document.getElementById('start-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
+  document.getElementById('qr-photo-input').addEventListener('change', onQrPhotoSelected);
   document.getElementById('manual-go').onclick = ()=>{
     const code = document.getElementById('manual-code').value.trim().toUpperCase();
     if(code) handleScanCode(code);
@@ -810,60 +809,48 @@ function renderScanner(){
   });
 }
 
-async function startScanner(){
+function onQrPhotoSelected(e){
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
   const vf = document.getElementById('viewfinder');
-  try{
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-  }catch(e){
-    vf.innerHTML = `<div class="idle">Accès caméra refusé ou indisponible.<br>Utilisez la saisie manuelle ci-dessous.</div>`;
-    return;
-  }
-  vf.innerHTML = `
-    <video id="scan-video" playsinline muted autoplay></video>
-    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
-    <div class="scan-line"></div>
-  `;
-  const video = document.getElementById('scan-video');
-  video.srcObject = scanStream;
-  await video.play();
+  vf.innerHTML = `<div class="idle">Analyse de la photo…</div>`;
 
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  const tick = ()=>{
-    if(video.readyState === video.HAVE_ENOUGH_DATA){
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const code = jsQR(imgData.data, imgData.width, imgData.height);
-      if(code && code.data){
-        handleScanCode(code.data.trim().toUpperCase());
-        return;
-      }
+  const img = new Image();
+  const url = URL.createObjectURL(file);
+  img.onload = ()=>{
+    URL.revokeObjectURL(url);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imgData.data, imgData.width, imgData.height);
+    if(code && code.data){
+      handleScanCode(code.data.trim().toUpperCase());
+    }else{
+      vf.innerHTML = `
+        <div class="idle">
+          Aucun QR code détecté sur cette photo.<br>Réessayez, en cadrant bien l'étiquette et avec un bon éclairage.
+          <button class="btn primary small" id="retry-scan" style="margin-top:10px">Reprendre une photo</button>
+        </div>`;
+      document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
     }
-    scanRAF = requestAnimationFrame(tick);
   };
-  scanRAF = requestAnimationFrame(tick);
-}
-
-function stopScanner(){
-  if(scanRAF) cancelAnimationFrame(scanRAF);
-  scanRAF = null;
-  if(scanStream){
-    scanStream.getTracks().forEach(tr=>tr.stop());
-    scanStream = null;
-  }
+  img.onerror = ()=>{
+    vf.innerHTML = `<div class="idle">Impossible de lire cette photo. <button class="btn primary small" id="retry-scan" style="margin-top:10px">Réessayer</button></div>`;
+    document.getElementById('retry-scan').onclick = ()=> document.getElementById('qr-photo-input').click();
+  };
+  img.src = url;
 }
 
 function handleScanCode(code){
-  stopScanner();
   const zone = zones.find(z=>z.code === code);
   const panel = document.getElementById('scan-result');
   const vf = document.getElementById('viewfinder');
   if(vf){
-    vf.innerHTML = `<div class="idle">Code lu : <b style="color:var(--ink)">${escapeHtml(code)}</b><br><button class="btn small" id="rescan-btn" style="margin-top:8px">Scanner à nouveau</button></div>`;
-    document.getElementById('rescan-btn').onclick = startScanner;
+    vf.innerHTML = `<div class="idle">Code lu : <b style="color:var(--ink)">${escapeHtml(code)}</b><br><button class="btn small" id="rescan-btn" style="margin-top:8px">Reprendre une photo</button></div>`;
+    document.getElementById('rescan-btn').onclick = ()=> document.getElementById('qr-photo-input').click();
   }
   if(!panel) return;
 
