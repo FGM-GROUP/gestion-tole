@@ -809,6 +809,11 @@ function renderScanner(){
   });
 }
 
+function decodeQrFromCanvas(ctx, w, h){
+  const imgData = ctx.getImageData(0, 0, w, h);
+  return jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+}
+
 function onQrPhotoSelected(e){
   const file = e.target.files && e.target.files[0];
   if(!file) return;
@@ -821,26 +826,32 @@ function onQrPhotoSelected(e){
   img.onload = ()=>{
     URL.revokeObjectURL(url);
     try{
-      // Redimensionner : les photos de téléphone (10-12 Mpx) sont trop lourdes
-      // à analyser directement et peuvent bloquer silencieusement le décodage.
-      const MAX_DIM = 1400;
-      const scale = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
-      const w = Math.max(1, Math.round(img.naturalWidth * scale));
-      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const nw = img.naturalWidth, nh = img.naturalHeight;
+      // Plusieurs tentatives à des résolutions différentes : une image trop réduite
+      // rend les petits carrés du QR illisibles, une image trop grande peut bloquer
+      // le décodage. On essaie donc plusieurs tailles jusqu'à ce que ça fonctionne.
+      const attempts = [2000, 1200, Math.max(nw, nh), 800];
+      let code = null;
 
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0, w, h);
+      for(const maxDim of attempts){
+        const scale = Math.min(1, maxDim / Math.max(nw, nh));
+        const w = Math.max(1, Math.round(nw * scale));
+        const h = Math.max(1, Math.round(nh * scale));
 
-      const imgData = ctx.getImageData(0, 0, w, h);
-      const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'attemptBoth' });
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+
+        code = decodeQrFromCanvas(ctx, w, h);
+        if(code && code.data) break;
+      }
 
       if(code && code.data){
         handleScanCode(code.data.trim().toUpperCase());
       }else{
-        showScanFailure("Aucun QR code détecté sur cette photo.<br>Réessayez en cadrant bien l'étiquette, de plus près, avec un bon éclairage.");
+        showScanFailure("Aucun QR code détecté sur cette photo.<br>Essayez de vous rapprocher un peu plus de l'étiquette et évitez les reflets.");
       }
     }catch(err){
       console.error('Erreur analyse QR:', err);
