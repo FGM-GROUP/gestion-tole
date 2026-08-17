@@ -196,12 +196,21 @@
 
   #print-area{display:none;}
   @media print{
+    @page{ size: A4 portrait; margin: 10mm; }
     body *{visibility:hidden;}
     #print-area, #print-area *{visibility:visible;}
-    #print-area{display:block;position:fixed;top:40px;left:40px;}
-    .print-tag{border:2px solid #000;padding:20px;width:260px;font-family:var(--mono);}
-    .print-tag .pcode{font-size:30px;font-weight:700;margin-bottom:4px;}
-    .print-tag .pname{font-size:14px;margin-bottom:12px;color:#333;}
+    #print-area{
+      display:flex;flex-direction:column;position:fixed;inset:0;align-items:center;padding-top:6mm;
+    }
+    .print-tag{
+      border:3px solid #000;padding:12mm;width:100%;max-width:188mm;min-height:118mm;box-sizing:border-box;font-family:var(--mono);
+    }
+    .print-tag .pcode{font-size:40px;font-weight:700;margin-bottom:6px;line-height:1.1;word-break:break-word;}
+    .print-tag .pname{font-size:20px;margin-bottom:16px;color:#333;}
+    .cut-line{
+      width:100%;max-width:188mm;margin-top:6mm;text-align:center;color:#888;font-size:11px;
+      border-top:1px dashed #999;padding-top:4px;font-family:var(--mono);
+    }
   }
 
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -2px;}
@@ -752,13 +761,14 @@ function printZoneTag(zone){
   if(!zone) return;
   const area = document.getElementById('print-area');
   area.innerHTML = `
-    <div class="print-tag">
+    <div class="print-tag" style="text-align:center;">
       <div class="pcode">${escapeHtml(zone.code)}</div>
       <div class="pname">${escapeHtml(zone.nom)}</div>
-      <div id="print-qr"></div>
+      <div id="print-qr" style="display:flex;justify-content:center;margin-top:10px;"></div>
     </div>
+    <div class="cut-line">✂ — — — — — découper ici — — — — —</div>
   `;
-  new QRCode(document.getElementById('print-qr'), { text: zone.code, width: 140, height: 140 });
+  new QRCode(document.getElementById('print-qr'), { text: zone.code, width: 220, height: 220 });
   setTimeout(()=> window.print(), 150);
 }
 
@@ -769,15 +779,16 @@ function printToleTag(t){
     <div class="print-tag">
       <div class="pcode">${escapeHtml(t.ref)}</div>
       <div class="pname">${escapeHtml(t.matiere)}${t.nuance ? ' · ' + escapeHtml(t.nuance) : ''}</div>
-      <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:10px;">
-        <tr><td style="padding:3px 0;color:#555;">Nuance</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.nuance ? escapeHtml(t.nuance) : '—'}</td></tr>
-        <tr><td style="padding:3px 0;color:#555;">Épaisseur</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.epaisseur} mm</td></tr>
-        <tr><td style="padding:3px 0;color:#555;">Dimensions</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.longueur}×${t.largeur} mm</td></tr>
-        <tr><td style="padding:3px 0;color:#555;">Zone</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.zone ? escapeHtml(t.zone) : '—'}</td></tr>
-        <tr><td style="padding:3px 0;color:#555;">Quantité</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.qte}</td></tr>
-        <tr><td style="padding:6px 0 0;color:#555;border-top:1px solid #ccc;">Date</td><td style="padding:6px 0 0;text-align:right;font-weight:600;border-top:1px solid #ccc;">${formatDate(t.dateModification)}</td></tr>
+      <table style="width:100%;font-size:19px;border-collapse:collapse;margin-top:16px;">
+        <tr><td style="padding:7px 0;color:#555;">Nuance</td><td style="padding:7px 0;text-align:right;font-weight:600;">${t.nuance ? escapeHtml(t.nuance) : '—'}</td></tr>
+        <tr><td style="padding:7px 0;color:#555;">Épaisseur</td><td style="padding:7px 0;text-align:right;font-weight:600;">${t.epaisseur} mm</td></tr>
+        <tr><td style="padding:7px 0;color:#555;">Dimensions</td><td style="padding:7px 0;text-align:right;font-weight:600;">${t.longueur}×${t.largeur} mm</td></tr>
+        <tr><td style="padding:7px 0;color:#555;">Zone</td><td style="padding:7px 0;text-align:right;font-weight:600;">${t.zone ? escapeHtml(t.zone) : '—'}</td></tr>
+        <tr><td style="padding:7px 0;color:#555;">Quantité</td><td style="padding:7px 0;text-align:right;font-weight:600;">${t.qte}</td></tr>
+        <tr><td style="padding:12px 0 0;color:#555;border-top:2px solid #ccc;">Date</td><td style="padding:12px 0 0;text-align:right;font-weight:600;border-top:2px solid #ccc;">${formatDate(t.dateModification)}</td></tr>
       </table>
     </div>
+    <div class="cut-line">✂ — — — — — découper ici — — — — —</div>
   `;
   setTimeout(()=> window.print(), 100);
 }

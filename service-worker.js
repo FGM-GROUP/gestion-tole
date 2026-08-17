@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tolerie-shell-v1';
+const CACHE_NAME = 'tolerie-shell-v2';
 const SHELL_FILES = [
   './index.html',
   './manifest.json',
