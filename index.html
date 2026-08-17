@@ -492,6 +492,7 @@ function renderInventaire(){
               <td>
                 <div class="row-actions">
                   <button class="btn ghost small" data-edit="${t.id}">Modifier</button>
+                  <button class="btn ghost small" data-print-tole="${t.id}">Étiquette</button>
                   <button class="btn ghost small" data-del="${t.id}">Suppr.</button>
                 </div>
               </td>
@@ -520,6 +521,9 @@ function renderInventaire(){
   });
   view.querySelectorAll('[data-edit]').forEach(b=>{
     b.onclick = ()=> openToleModal(toles.find(x=>x.id===b.dataset.edit));
+  });
+  view.querySelectorAll('[data-print-tole]').forEach(b=>{
+    b.onclick = ()=> printToleTag(toles.find(x=>x.id===b.dataset.printTole));
   });
   view.querySelectorAll('[data-del]').forEach(b=>{
     b.onclick = async ()=>{
@@ -756,6 +760,26 @@ function printZoneTag(zone){
   `;
   new QRCode(document.getElementById('print-qr'), { text: zone.code, width: 140, height: 140 });
   setTimeout(()=> window.print(), 150);
+}
+
+function printToleTag(t){
+  if(!t) return;
+  const area = document.getElementById('print-area');
+  area.innerHTML = `
+    <div class="print-tag">
+      <div class="pcode">${escapeHtml(t.ref)}</div>
+      <div class="pname">${escapeHtml(t.matiere)}${t.nuance ? ' · ' + escapeHtml(t.nuance) : ''}</div>
+      <table style="width:100%;font-size:12px;border-collapse:collapse;margin-top:10px;">
+        <tr><td style="padding:3px 0;color:#555;">Nuance</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.nuance ? escapeHtml(t.nuance) : '—'}</td></tr>
+        <tr><td style="padding:3px 0;color:#555;">Épaisseur</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.epaisseur} mm</td></tr>
+        <tr><td style="padding:3px 0;color:#555;">Dimensions</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.longueur}×${t.largeur} mm</td></tr>
+        <tr><td style="padding:3px 0;color:#555;">Zone</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.zone ? escapeHtml(t.zone) : '—'}</td></tr>
+        <tr><td style="padding:3px 0;color:#555;">Quantité</td><td style="padding:3px 0;text-align:right;font-weight:600;">${t.qte}</td></tr>
+        <tr><td style="padding:6px 0 0;color:#555;border-top:1px solid #ccc;">Date</td><td style="padding:6px 0 0;text-align:right;font-weight:600;border-top:1px solid #ccc;">${formatDate(t.dateModification)}</td></tr>
+      </table>
+    </div>
+  `;
+  setTimeout(()=> window.print(), 100);
 }
 
 /* ---------------------------------------------------------
