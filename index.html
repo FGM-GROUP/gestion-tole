@@ -1364,10 +1364,13 @@ function analyzeDxfForLaser(text){
   const entities = dxf.entities || [];
   let totalLength = 0;
   let pierces = 0;
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  function bboxPt(x,y){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
 
   entities.forEach(e=>{
     if(e.type === 'LINE' && e.vertices && e.vertices.length>=2){
       totalLength += dist(e.vertices[0].x,e.vertices[0].y,e.vertices[1].x,e.vertices[1].y);
+      e.vertices.forEach(v=>bboxPt(v.x,v.y));
       pierces++;
     }
     else if((e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') && e.vertices && e.vertices.length>1){
@@ -1377,10 +1380,12 @@ function analyzeDxfForLaser(text){
       if(e.shape || e.closed){
         totalLength += dist(e.vertices[e.vertices.length-1].x,e.vertices[e.vertices.length-1].y,e.vertices[0].x,e.vertices[0].y);
       }
+      e.vertices.forEach(v=>bboxPt(v.x,v.y));
       pierces++;
     }
     else if(e.type === 'CIRCLE' && e.center && e.radius){
       totalLength += 2*Math.PI*e.radius;
+      bboxPt(e.center.x-e.radius, e.center.y-e.radius); bboxPt(e.center.x+e.radius, e.center.y+e.radius);
       pierces++;
     }
     else if(e.type === 'ARC' && e.center && e.radius!=null){
@@ -1388,25 +1393,75 @@ function analyzeDxfForLaser(text){
       let sweep = a2 - a1;
       if(sweep < 0) sweep += 2*Math.PI;
       totalLength += e.radius * sweep;
+      bboxPt(e.center.x-e.radius, e.center.y-e.radius); bboxPt(e.center.x+e.radius, e.center.y+e.radius);
       pierces++;
     }
     else if(e.type === 'SPLINE' && e.controlPoints && e.controlPoints.length>1){
       for(let i=0;i<e.controlPoints.length-1;i++){
         totalLength += dist(e.controlPoints[i].x,e.controlPoints[i].y,e.controlPoints[i+1].x,e.controlPoints[i+1].y);
       }
+      e.controlPoints.forEach(v=>bboxPt(v.x,v.y));
       pierces++;
     }
     else if(e.type === 'ELLIPSE' && e.center && e.majorAxisEndPoint){
       const a = Math.hypot(e.majorAxisEndPoint.x, e.majorAxisEndPoint.y);
       const b = a * (e.axisRatio || 1);
       totalLength += Math.PI*(3*(a+b) - Math.sqrt((3*a+b)*(a+3*b))); // approximation de Ramanujan
+      bboxPt(e.center.x-a, e.center.y-a); bboxPt(e.center.x+a, e.center.y+a);
       pierces++;
     }
   });
 
   if(pierces === 0) throw new Error('Aucune géométrie de découpe exploitable trouvée dans ce DXF.');
-  return { totalLength, pierces };
+  const bbox = isFinite(minX) ? { minX, minY, maxX, maxY } : { minX:0, minY:0, maxX:0, maxY:0 };
+  return { totalLength, pierces, entities, bbox };
 }
+
+function buildDxfSvg(entities, bbox, maxW, maxH){
+  const w = Math.max(1, bbox.maxX - bbox.minX);
+  const h = Math.max(1, bbox.maxY - bbox.minY);
+  const pad = Math.max(w,h) * 0.04;
+  const scale = Math.min(maxW/(w+pad*2), maxH/(h+pad*2));
+  const vbW = (w+pad*2)*scale, vbH = (h+pad*2)*scale;
+  // Convertit un point DXF (Y vers le haut) en coordonnées SVG (Y vers le bas)
+  function sx(x){ return (x - bbox.minX + pad) * scale; }
+  function sy(y){ return vbH - (y - bbox.minY + pad) * scale; }
+
+  let paths = '';
+  entities.forEach(e=>{
+    if(e.type === 'LINE' && e.vertices && e.vertices.length>=2){
+      paths += `<line x1="${sx(e.vertices[0].x)}" y1="${sy(e.vertices[0].y)}" x2="${sx(e.vertices[1].x)}" y2="${sy(e.vertices[1].y)}"/>`;
+    }
+    else if((e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') && e.vertices && e.vertices.length>1){
+      const pts = e.vertices.map(v=>`${sx(v.x)},${sy(v.y)}`).join(' ');
+      paths += (e.shape || e.closed) ? `<polygon points="${pts}"/>` : `<polyline points="${pts}"/>`;
+    }
+    else if(e.type === 'CIRCLE' && e.center && e.radius){
+      paths += `<circle cx="${sx(e.center.x)}" cy="${sy(e.center.y)}" r="${e.radius*scale}"/>`;
+    }
+    else if(e.type === 'ARC' && e.center && e.radius!=null){
+      let a1=e.startAngle, a2=e.endAngle, sweep=a2-a1; if(sweep<0) sweep+=2*Math.PI;
+      const x1 = e.center.x + e.radius*Math.cos(a1), y1 = e.center.y + e.radius*Math.sin(a1);
+      const x2 = e.center.x + e.radius*Math.cos(a2), y2 = e.center.y + e.radius*Math.sin(a2);
+      const large = sweep > Math.PI ? 1 : 0;
+      paths += `<path d="M ${sx(x1)} ${sy(y1)} A ${e.radius*scale} ${e.radius*scale} 0 ${large} 0 ${sx(x2)} ${sy(y2)}"/>`;
+    }
+    else if(e.type === 'SPLINE' && e.controlPoints && e.controlPoints.length>1){
+      const pts = e.controlPoints.map(v=>`${sx(v.x)},${sy(v.y)}`).join(' ');
+      paths += `<polyline points="${pts}"/>`;
+    }
+    else if(e.type === 'ELLIPSE' && e.center && e.majorAxisEndPoint){
+      const a = Math.hypot(e.majorAxisEndPoint.x, e.majorAxisEndPoint.y);
+      const b = a * (e.axisRatio || 1);
+      paths += `<ellipse cx="${sx(e.center.x)}" cy="${sy(e.center.y)}" rx="${a*scale}" ry="${b*scale}"/>`;
+    }
+  });
+
+  return `<svg width="${vbW}" height="${vbH}" viewBox="0 0 ${vbW} ${vbH}" style="background:#fff;">
+    <g fill="none" stroke="#1a1a1a" stroke-width="1.2">${paths}</g>
+  </svg>`;
+}
+
 
 function laserCompute(){
   if(!laserResult) return null;
@@ -1469,6 +1524,9 @@ function renderDecoupeLaser(){
         <div class="result-card" style="text-align:center;">
           <div style="font-size:12px;color:var(--ink-dim);">Temps total estimé</div>
           <div style="font-family:var(--display);font-size:30px;color:var(--accent);margin-top:4px;">${fmtMin(calc.tempsTotalMin)}</div>
+        </div>
+        <div style="overflow-x:auto;margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);">
+          ${buildDxfSvg(laserResult.entities, laserResult.bbox, 600, 420)}
         </div>
       </div>
     ` : `<div class="empty" style="padding:36px 24px;"><b>Aucun fichier chargé</b>Charge un DXF pour voir l'estimation du temps de découpe.</div>`}
