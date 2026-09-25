@@ -416,6 +416,7 @@ async function loadData(){
           ref: data.ref || '', matiere: data.matiere || 'Acier', nuance: data.nuance || '',
           epaisseur: Number(data.epaisseur) || 0, longueur: Number(data.longueur) || 0, largeur: Number(data.largeur) || 0,
           qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || '', palette: data.palette || '',
+          secteur: data.secteur || 'Autre',
           dateCreation: data.dateCreation || null, dateModification: data.dateModification || null
         };
       });
@@ -465,6 +466,7 @@ async function saveToles(){
         ref: t.ref, matiere: t.matiere, nuance: t.nuance || '',
         epaisseur: t.epaisseur, longueur: t.longueur, largeur: t.largeur,
         qte: t.qte, seuil: t.seuil, zone: t.zone || '', palette: t.palette || '',
+        secteur: t.secteur || 'Autre',
         dateCreation: t.dateCreation || new Date().toISOString(),
         dateModification: t.dateModification || new Date().toISOString()
       };
@@ -535,6 +537,7 @@ let invZoneFilter = '';
 let invNuanceFilter = '';
 let invEpFilter = '';
 let invPaletteFilter = '';
+let invSecteurFilter = '';
 
 function renderInventaire(){
   const view = document.getElementById('view');
@@ -544,7 +547,8 @@ function renderInventaire(){
     const matchNuance = !invNuanceFilter || (t.nuance||'') === invNuanceFilter;
     const matchEp = !invEpFilter || String(t.epaisseur) === invEpFilter;
     const matchPalette = !invPaletteFilter || (t.palette||'') === invPaletteFilter;
-    return matchSearch && matchZone && matchNuance && matchEp && matchPalette;
+    const matchSecteur = !invSecteurFilter || (t.secteur||'Autre') === invSecteurFilter;
+    return matchSearch && matchZone && matchNuance && matchEp && matchPalette && matchSecteur;
   });
   const nuancesDispo = [...new Set(toles.map(t=>t.nuance).filter(Boolean))].sort();
   const epaisseursDispo = [...new Set(toles.map(t=>t.epaisseur))].sort((a,b)=>a-b);
@@ -578,6 +582,10 @@ function renderInventaire(){
         <option value="">Toutes les palettes</option>
         ${palettesDispo.map(p=>`<option value="${escapeHtml(p)}" ${invPaletteFilter===p?'selected':''}>Palette n°${escapeHtml(p)}</option>`).join('')}
       </select>
+      <select id="inv-secteur-filter">
+        <option value="">Tous secteurs</option>
+        ${['Aéronautique','Autre'].map(s=>`<option value="${s}" ${invSecteurFilter===s?'selected':''}>${s}</option>`).join('')}
+      </select>
     </div>
 
     ${filtered.length === 0 ? `
@@ -590,7 +598,7 @@ function renderInventaire(){
       <table>
         <thead>
           <tr>
-            <th>Référence</th><th>Matière</th><th>Nuance</th><th>Palette</th><th>Dimensions</th><th>Épaisseur</th>
+            <th>Référence</th><th>Matière</th><th>Nuance</th><th>Palette</th><th>Secteur</th><th>Dimensions</th><th>Épaisseur</th>
             <th>Zone</th><th>Quantité</th><th>Modifié le</th><th></th>
           </tr>
         </thead>
@@ -601,6 +609,7 @@ function renderInventaire(){
               <td>${escapeHtml(t.matiere)}</td>
               <td class="dim">${t.nuance ? escapeHtml(t.nuance) : '—'}</td>
               <td class="dim">${t.palette ? 'N°'+escapeHtml(t.palette) : '—'}</td>
+              <td class="dim">${escapeHtml(t.secteur||'Autre')}</td>
               <td class="dim">${t.longueur}×${t.largeur} mm</td>
               <td class="dim">${t.epaisseur} mm</td>
               <td>${t.zone ? `<span class="zone-pill">${t.zone}</span>` : '<span class="dim">—</span>'}</td>
@@ -633,6 +642,7 @@ function renderInventaire(){
   document.getElementById('inv-nuance-filter').onchange = (e)=>{ invNuanceFilter = e.target.value; renderInventaire(); };
   document.getElementById('inv-ep-filter').onchange = (e)=>{ invEpFilter = e.target.value; renderInventaire(); };
   document.getElementById('inv-palette-filter').onchange = (e)=>{ invPaletteFilter = e.target.value; renderInventaire(); };
+  document.getElementById('inv-secteur-filter').onchange = (e)=>{ invSecteurFilter = e.target.value; renderInventaire(); };
 
   view.querySelectorAll('[data-qty]').forEach(b=>{
     b.onclick = async ()=>{
@@ -662,7 +672,7 @@ function renderInventaire(){
 
 function openToleModal(existing, prefillZone){
   const editing = !!existing;
-  const t = existing || { id: uid(), ref:'', matiere: settings.defaultMatiere || 'Acier', nuance:'', epaisseur: settings.defaultEpaisseur ?? 1, longueur: settings.defaultLongueur ?? 1000, largeur: settings.defaultLargeur ?? 1000, qte:1, seuil: settings.defaultSeuil ?? 1, zone: prefillZone || '', palette:'' };
+  const t = existing || { id: uid(), ref:'', matiere: settings.defaultMatiere || 'Acier', nuance:'', epaisseur: settings.defaultEpaisseur ?? 1, longueur: settings.defaultLongueur ?? 1000, largeur: settings.defaultLargeur ?? 1000, qte:1, seuil: settings.defaultSeuil ?? 1, zone: prefillZone || '', palette:'', secteur:'Autre' };
 
   const excludeId = editing ? t.id : null;
   const usedByOthers = [...new Set(toles.filter(x=>x.id!==excludeId && x.palette).map(x=>parseInt(x.palette,10)).filter(n=>!isNaN(n)))].sort((a,b)=>a-b);
@@ -699,6 +709,7 @@ function openToleModal(existing, prefillZone){
         <div class="field"><label>Épaisseur (mm)</label><input type="number" step="0.1" id="f-ep" value="${t.epaisseur}"></div>
       </div>
       <div class="field"><label>Nuance</label><input type="text" id="f-nuance" value="${escapeHtml(t.nuance||'')}" placeholder="Ex. S235JR, DX51D, 5754, 304L…"></div>
+      <div class="field"><label>Secteur</label><select id="f-secteur">${['Aéronautique','Autre'].map(s=>`<option ${((t.secteur||'Autre')===s)?'selected':''}>${s}</option>`).join('')}</select></div>
       <div class="field"><label>N° de palette <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(automatique — se libère quand plus aucune tôle ne l'utilise)</span></label><select id="f-palette">${paletteOptionsHtml}</select></div>
       <div class="grid2">
         <div class="field"><label>Longueur (mm)</label><input type="number" id="f-long" value="${t.longueur}"></div>
@@ -758,6 +769,7 @@ function openToleModal(existing, prefillZone){
     t.ref = ref;
     t.matiere = overlay.querySelector('#f-matiere').value;
     t.nuance = overlay.querySelector('#f-nuance').value.trim();
+    t.secteur = overlay.querySelector('#f-secteur').value;
     t.palette = overlay.querySelector('#f-palette').value.trim();
     t.epaisseur = parseFloat(overlay.querySelector('#f-ep').value) || 0;
     t.longueur = parseInt(overlay.querySelector('#f-long').value) || 0;
