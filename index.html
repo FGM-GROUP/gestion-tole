@@ -383,42 +383,58 @@ function generateRef(matiere, nuance, epaisseur, longueur, largeur, excludeId){
   return `${base}-${String(next).padStart(3,'0')}`;
 }
 
+let unsubToles = null, unsubZones = null, unsubSettings = null;
+
+function detachListeners(){
+  if(unsubToles){ unsubToles(); unsubToles = null; }
+  if(unsubZones){ unsubZones(); unsubZones = null; }
+  if(unsubSettings){ unsubSettings(); unsubSettings = null; }
+}
+
 async function loadData(){
-  try{
-    const snap = await db.collection('toles').get();
-    toles = snap.docs.map(d=>{
-      const data = d.data();
-      return {
-        id: uid(), _fbId: d.id,
-        ref: data.ref || '', matiere: data.matiere || 'Acier', nuance: data.nuance || '',
-        epaisseur: Number(data.epaisseur) || 0, longueur: Number(data.longueur) || 0, largeur: Number(data.largeur) || 0,
-        qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || '', palette: data.palette || '',
-        dateCreation: data.dateCreation || null, dateModification: data.dateModification || null
-      };
-    });
-    serverIdSnapshots.toles = new Set(toles.map(t=>t._fbId));
-  }catch(e){ console.error(e); toles = []; toast('Impossible de charger le stock depuis Firebase'); }
+  await new Promise((resolve)=>{
+    let done = 0;
+    const checkDone = ()=>{ done++; if(done>=3) resolve(); };
 
-  try{
-    const zsnap = await db.collection('zones').get();
-    zones = zsnap.docs.map(d=>({ code: d.id, nom: d.data().nom || d.id }));
-    serverIdSnapshots.zones = new Set(zones.map(z=>z.code));
-  }catch(e){ console.error(e); zones = []; toast('Impossible de charger les zones depuis Firebase'); }
+    unsubToles = db.collection('toles').onSnapshot(snap=>{
+      toles = snap.docs.map(d=>{
+        const data = d.data();
+        return {
+          id: uid(), _fbId: d.id,
+          ref: data.ref || '', matiere: data.matiere || 'Acier', nuance: data.nuance || '',
+          epaisseur: Number(data.epaisseur) || 0, longueur: Number(data.longueur) || 0, largeur: Number(data.largeur) || 0,
+          qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || '', palette: data.palette || '',
+          dateCreation: data.dateCreation || null, dateModification: data.dateModification || null
+        };
+      });
+      serverIdSnapshots.toles = new Set(toles.map(t=>t._fbId));
+      if(done>=3) renderLiveSafe();
+      checkDone();
+    }, e=>{ console.error(e); toles = []; toast('Impossible de charger le stock depuis Firebase'); checkDone(); });
 
-  try{
-    const sdoc = await db.collection('config').doc('settings').get();
-    if(sdoc.exists){
-      const d = sdoc.data();
-      settings = {
-        paletteStart: Number(d.paletteStart) || 1,
-        defaultLongueur: Number(d.defaultLongueur) || 1000,
-        defaultLargeur: Number(d.defaultLargeur) || 1000,
-        defaultEpaisseur: Number(d.defaultEpaisseur) || 1,
-        defaultMatiere: d.defaultMatiere || 'Acier',
-        defaultSeuil: Number(d.defaultSeuil) || 1,
-      };
-    }
-  }catch(e){ console.error(e); /* on garde les valeurs par défaut */ }
+    unsubZones = db.collection('zones').onSnapshot(snap=>{
+      zones = snap.docs.map(d=>({ code: d.id, nom: d.data().nom || d.id }));
+      serverIdSnapshots.zones = new Set(zones.map(z=>z.code));
+      if(done>=3) renderLiveSafe();
+      checkDone();
+    }, e=>{ console.error(e); zones = []; toast('Impossible de charger les zones depuis Firebase'); checkDone(); });
+
+    unsubSettings = db.collection('config').doc('settings').onSnapshot(sdoc=>{
+      if(sdoc.exists){
+        const d = sdoc.data();
+        settings = {
+          paletteStart: Number(d.paletteStart) || 1,
+          defaultLongueur: Number(d.defaultLongueur) || 1000,
+          defaultLargeur: Number(d.defaultLargeur) || 1000,
+          defaultEpaisseur: Number(d.defaultEpaisseur) || 1,
+          defaultMatiere: d.defaultMatiere || 'Acier',
+          defaultSeuil: Number(d.defaultSeuil) || 1,
+        };
+      }
+      if(done>=3) renderLiveSafe();
+      checkDone();
+    }, e=>{ console.error(e); checkDone(); });
+  });
 }
 
 async function saveSettings(){
@@ -488,6 +504,14 @@ function render(){
   else if(currentTab === 'scanner') renderScanner();
   else if(currentTab === 'parametres') renderParametres();
   else if(currentTab === 'imbrication') renderImbrication();
+}
+
+/* Utilisée par les écouteurs temps réel : on évite de redessiner l'onglet Scanner
+   (couperait la caméra en plein scan) et l'onglet Imbrication (perdrait la saisie en cours). */
+function renderLiveSafe(){
+  if(currentTab === 'inventaire') renderInventaire();
+  else if(currentTab === 'zones') renderZones();
+  else if(currentTab === 'parametres') renderParametres();
 }
 
 /* ---------------------------------------------------------
@@ -1654,6 +1678,7 @@ auth.onAuthStateChanged(user => {
   if(user){
     startApp(user);
   }else{
+    detachListeners();
     document.getElementById('ruler').style.display = 'none';
     document.getElementById('sidebar').style.display = 'none';
     document.getElementById('main-view').style.display = 'none';
