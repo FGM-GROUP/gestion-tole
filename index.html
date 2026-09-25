@@ -128,6 +128,10 @@
   .qty-val{font-family:var(--mono);min-width:24px;text-align:center;font-weight:600;}
   .qty-low .qty-val{color:var(--danger);}
   .row-actions{display:flex;gap:4px;justify-content:flex-end;}
+  .attach-badge{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;font-size:13px;}
+  .attach-badge.filled{background:var(--accent);color:#1a1a1a;cursor:pointer;border:none;}
+  .attach-badge.filled:hover{filter:brightness(1.1);}
+  .attach-badge.empty{background:transparent;border:1px dashed var(--line);color:var(--ink-dim);}
 
   .empty{
     border:1px dashed var(--line);border-radius:var(--radius);padding:46px 24px;text-align:center;color:var(--ink-dim);
@@ -600,7 +604,7 @@ function renderInventaire(){
       <table>
         <thead>
           <tr>
-            <th>Référence</th><th>Matière</th><th>Nuance</th><th>Palette</th><th>Secteur</th><th>Dimensions</th><th>Épaisseur</th>
+            <th>Référence</th><th>Matière</th><th>Nuance</th><th>Palette</th><th>Secteur</th><th>PJ</th><th>Dimensions</th><th>Épaisseur</th>
             <th>Zone</th><th>Quantité</th><th>Modifié le</th><th></th>
           </tr>
         </thead>
@@ -612,6 +616,11 @@ function renderInventaire(){
               <td class="dim">${t.nuance ? escapeHtml(t.nuance) : '—'}</td>
               <td class="dim">${t.palette ? 'N°'+escapeHtml(t.palette) : '—'}</td>
               <td class="dim">${escapeHtml(t.secteur||'Autre')}</td>
+              <td style="text-align:center;">
+                ${t.attachment
+                  ? `<button class="attach-badge filled" data-view-attach="${t.id}" title="${escapeHtml(t.attachment.name)}">📎</button>`
+                  : `<span class="attach-badge empty">—</span>`}
+              </td>
               <td class="dim">${t.longueur}×${t.largeur} mm</td>
               <td class="dim">${t.epaisseur} mm</td>
               <td>${t.zone ? `<span class="zone-pill">${t.zone}</span>` : '<span class="dim">—</span>'}</td>
@@ -625,7 +634,6 @@ function renderInventaire(){
               <td class="dim">${formatDate(t.dateModification)}</td>
               <td>
                 <div class="row-actions">
-                  ${t.attachment ? `<button class="btn ghost small" data-view-attach="${t.id}" title="${escapeHtml(t.attachment.name)}">📎</button>` : ''}
                   <button class="btn ghost small" data-edit="${t.id}">Modifier</button>
                   <button class="btn ghost small" data-print-tole="${t.id}">Étiquette</button>
                   <button class="btn ghost small" data-del="${t.id}">Suppr.</button>
