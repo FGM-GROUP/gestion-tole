@@ -417,6 +417,7 @@ async function loadData(){
           epaisseur: Number(data.epaisseur) || 0, longueur: Number(data.longueur) || 0, largeur: Number(data.largeur) || 0,
           qte: Number(data.qte) || 0, seuil: Number(data.seuil) || 0, zone: data.zone || '', palette: data.palette || '',
           secteur: data.secteur || 'Autre',
+          attachment: data.attachment || null,
           dateCreation: data.dateCreation || null, dateModification: data.dateModification || null
         };
       });
@@ -467,6 +468,7 @@ async function saveToles(){
         epaisseur: t.epaisseur, longueur: t.longueur, largeur: t.largeur,
         qte: t.qte, seuil: t.seuil, zone: t.zone || '', palette: t.palette || '',
         secteur: t.secteur || 'Autre',
+        attachment: t.attachment || null,
         dateCreation: t.dateCreation || new Date().toISOString(),
         dateModification: t.dateModification || new Date().toISOString()
       };
@@ -623,6 +625,7 @@ function renderInventaire(){
               <td class="dim">${formatDate(t.dateModification)}</td>
               <td>
                 <div class="row-actions">
+                  ${t.attachment ? `<button class="btn ghost small" data-view-attach="${t.id}" title="${escapeHtml(t.attachment.name)}">📎</button>` : ''}
                   <button class="btn ghost small" data-edit="${t.id}">Modifier</button>
                   <button class="btn ghost small" data-print-tole="${t.id}">Étiquette</button>
                   <button class="btn ghost small" data-del="${t.id}">Suppr.</button>
@@ -659,6 +662,12 @@ function renderInventaire(){
   view.querySelectorAll('[data-print-tole]').forEach(b=>{
     b.onclick = ()=> printToleTag(toles.find(x=>x.id===b.dataset.printTole));
   });
+  view.querySelectorAll('[data-view-attach]').forEach(b=>{
+    b.onclick = ()=>{
+      const t = toles.find(x=>x.id===b.dataset.viewAttach);
+      if(t && t.attachment) openAttachmentViewer(t.attachment);
+    };
+  });
   view.querySelectorAll('[data-del]').forEach(b=>{
     b.onclick = async ()=>{
       if(confirm('Supprimer cette référence du stock ?')){
@@ -670,9 +679,54 @@ function renderInventaire(){
   });
 }
 
+function compressImageFile(file, maxDim=1280, quality=0.72){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onload = ()=>{
+        let w = img.width, h = img.height;
+        if(w > h && w > maxDim){ h = Math.round(h*maxDim/w); w = maxDim; }
+        else if(h >= w && h > maxDim){ w = Math.round(w*maxDim/h); h = maxDim; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = ()=>reject(new Error('Image illisible'));
+      img.src = reader.result;
+    };
+    reader.onerror = ()=>reject(new Error('Lecture du fichier impossible'));
+    reader.readAsDataURL(file);
+  });
+}
+function readFileAsDataUrl(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>resolve(reader.result);
+    reader.onerror = ()=>reject(new Error('Lecture du fichier impossible'));
+    reader.readAsDataURL(file);
+  });
+}
+function openAttachmentViewer(att){
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  const isImg = att.type && att.type.startsWith('image/');
+  overlay.innerHTML = `
+    <div class="modal" style="max-width:520px;">
+      <h2>${escapeHtml(att.name)}</h2>
+      ${isImg ? `<img src="${att.dataUrl}" style="width:100%;border-radius:var(--radius);">` : `<a href="${att.dataUrl}" download="${escapeHtml(att.name)}" class="btn primary">Télécharger le fichier</a>`}
+      <div class="modal-actions"><button class="btn ghost" id="close-attach">Fermer</button></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
+  overlay.querySelector('#close-attach').onclick = ()=> overlay.remove();
+}
+
 function openToleModal(existing, prefillZone){
   const editing = !!existing;
-  const t = existing || { id: uid(), ref:'', matiere: settings.defaultMatiere || 'Acier', nuance:'', epaisseur: settings.defaultEpaisseur ?? 1, longueur: settings.defaultLongueur ?? 1000, largeur: settings.defaultLargeur ?? 1000, qte:1, seuil: settings.defaultSeuil ?? 1, zone: prefillZone || '', palette:'', secteur:'Autre' };
+  const t = existing || { id: uid(), ref:'', matiere: settings.defaultMatiere || 'Acier', nuance:'', epaisseur: settings.defaultEpaisseur ?? 1, longueur: settings.defaultLongueur ?? 1000, largeur: settings.defaultLargeur ?? 1000, qte:1, seuil: settings.defaultSeuil ?? 1, zone: prefillZone || '', palette:'', secteur:'Autre', attachment: null };
+  let attachment = t.attachment || null;
 
   const excludeId = editing ? t.id : null;
   const usedByOthers = [...new Set(toles.filter(x=>x.id!==excludeId && x.palette).map(x=>parseInt(x.palette,10)).filter(n=>!isNaN(n)))].sort((a,b)=>a-b);
@@ -710,6 +764,16 @@ function openToleModal(existing, prefillZone){
       </div>
       <div class="field"><label>Nuance</label><input type="text" id="f-nuance" value="${escapeHtml(t.nuance||'')}" placeholder="Ex. S235JR, DX51D, 5754, 304L…"></div>
       <div class="field"><label>Secteur</label><select id="f-secteur">${['Aéronautique','Autre'].map(s=>`<option ${((t.secteur||'Autre')===s)?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div class="field">
+        <label>Photo / fichier joint <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(certificat matière, photo de la tôle…)</span></label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button type="button" class="btn ghost small" id="btn-take-photo">📷 Prendre une photo</button>
+          <button type="button" class="btn ghost small" id="btn-choose-file">📎 Choisir un fichier</button>
+          <input type="file" id="f-photo-capture" accept="image/*" capture="environment" style="display:none;">
+          <input type="file" id="f-file-attach" style="display:none;">
+        </div>
+        <div id="attach-preview" style="margin-top:10px;"></div>
+      </div>
       <div class="field"><label>N° de palette <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(automatique — se libère quand plus aucune tôle ne l'utilise)</span></label><select id="f-palette">${paletteOptionsHtml}</select></div>
       <div class="grid2">
         <div class="field"><label>Longueur (mm)</label><input type="number" id="f-long" value="${t.longueur}"></div>
@@ -763,6 +827,57 @@ function openToleModal(existing, prefillZone){
   });
   if(!editing) recomputeRef();
 
+  function renderAttachPreview(){
+    const el = overlay.querySelector('#attach-preview');
+    if(!attachment){
+      el.innerHTML = `<span class="hint" style="font-size:12px;color:var(--ink-dim);">Aucun fichier joint.</span>`;
+      return;
+    }
+    const isImg = attachment.type && attachment.type.startsWith('image/');
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;">
+        ${isImg
+          ? `<img src="${attachment.dataUrl}" style="width:56px;height:56px;object-fit:cover;border-radius:var(--radius);border:1px solid var(--line);">`
+          : `<div style="width:56px;height:56px;display:flex;align-items:center;justify-content:center;background:var(--panel-2);border-radius:var(--radius);border:1px solid var(--line);font-size:20px;">📄</div>`}
+        <div style="flex:1;font-size:12px;color:var(--ink-dim);word-break:break-all;">${escapeHtml(attachment.name)}</div>
+        <button type="button" class="btn ghost small" id="btn-remove-attach">Retirer</button>
+      </div>`;
+    el.querySelector('#btn-remove-attach').onclick = ()=>{ attachment = null; renderAttachPreview(); };
+  }
+  renderAttachPreview();
+
+  overlay.querySelector('#btn-take-photo').onclick = ()=> overlay.querySelector('#f-photo-capture').click();
+  overlay.querySelector('#btn-choose-file').onclick = ()=> overlay.querySelector('#f-file-attach').click();
+
+  overlay.querySelector('#f-photo-capture').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      const dataUrl = await compressImageFile(file);
+      if(dataUrl.length > 700000){ toast('Photo trop volumineuse même compressée — réessaie.'); return; }
+      attachment = { name: file.name || 'photo.jpg', type: 'image/jpeg', dataUrl };
+      renderAttachPreview();
+    }catch(err){ console.error(err); toast('Impossible de traiter la photo'); }
+    e.target.value = '';
+  };
+
+  overlay.querySelector('#f-file-attach').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      let dataUrl;
+      if(file.type && file.type.startsWith('image/')){
+        dataUrl = await compressImageFile(file);
+      }else{
+        dataUrl = await readFileAsDataUrl(file);
+      }
+      if(dataUrl.length > 700000){ toast('Fichier trop volumineux (limite ~500 Ko) — choisis un fichier plus léger.'); return; }
+      attachment = { name: file.name, type: file.type || 'application/octet-stream', dataUrl };
+      renderAttachPreview();
+    }catch(err){ console.error(err); toast('Impossible de lire ce fichier'); }
+    e.target.value = '';
+  };
+
   overlay.querySelector('#save-tole').onclick = async ()=>{
     const ref = overlay.querySelector('#f-ref').value.trim();
     if(!ref){ toast('La référence est requise'); return; }
@@ -777,6 +892,7 @@ function openToleModal(existing, prefillZone){
     t.qte = parseInt(overlay.querySelector('#f-qte').value) || 0;
     t.seuil = parseInt(overlay.querySelector('#f-seuil').value) || 0;
     t.zone = overlay.querySelector('#f-zone').value;
+    t.attachment = attachment;
     const now = new Date().toISOString();
     if(!editing){
       t.dateCreation = now;
