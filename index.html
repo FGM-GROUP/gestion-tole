@@ -1120,6 +1120,21 @@ function packMaxRects(sheetL, sheetW, units, gap){
   return { placed, unplaced };
 }
 
+function estimateMaxUnitsCount(partL, partW, sheetL, sheetW, gap){
+  const area = (partL+gap)*(partW+gap);
+  if(area<=0 || partL<=0 || partW<=0) return 0;
+  return Math.min(3000, Math.ceil((sheetL*sheetW)/area) + 4);
+}
+
+function calcMaxPourPiece(p){
+  const sheetL = nestSheet.longueur, sheetW = nestSheet.largeur, gap = nestGap;
+  const n = estimateMaxUnitsCount(p.longueur, p.largeur, sheetL, sheetW, gap);
+  if(n<=0) return 0;
+  const units = Array.from({length:n}, ()=>({nom:p.nom, w:p.longueur, h:p.largeur}));
+  const result = packMaxRects(sheetL, sheetW, units, gap);
+  return result.placed.length;
+}
+
 function nestCompute(){
   const sheetL = nestSheet.longueur, sheetW = nestSheet.largeur, gap = nestGap;
   const baseUnits = [];
@@ -1182,19 +1197,24 @@ function renderImbrication(){
       ${nestParts.length ? `
         <div class="table-wrap" style="margin-top:16px;">
         <table>
-          <thead><tr><th>Pièce</th><th>Longueur</th><th>Largeur</th><th>Qté</th><th></th></tr></thead>
+          <thead><tr><th>Pièce</th><th>Longueur</th><th>Largeur</th><th>Qté</th><th>Max sur la tôle</th><th></th></tr></thead>
           <tbody>
-            ${nestParts.map(p=>`
+            ${nestParts.map(p=>{
+              const maxP = calcMaxPourPiece(p);
+              return `
               <tr>
                 <td><input type="text" data-nest-field="nom" data-nest-id="${p.id}" value="${escapeHtml(p.nom)}" style="width:100%;"></td>
                 <td><input type="number" data-nest-field="longueur" data-nest-id="${p.id}" value="${p.longueur}" style="width:80px;"></td>
                 <td><input type="number" data-nest-field="largeur" data-nest-id="${p.id}" value="${p.largeur}" style="width:80px;"></td>
                 <td><input type="number" data-nest-field="qte" data-nest-id="${p.id}" value="${p.qte}" min="1" style="width:60px;"></td>
+                <td><span class="dim">${maxP}</span> <button class="btn ghost small" data-nest-usemax="${p.id}" data-nest-max="${maxP}">Utiliser</button></td>
                 <td><div class="row-actions"><button class="btn ghost small" data-nest-remove="${p.id}">Retirer</button></div></td>
-              </tr>`).join('')}
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
         </div>
+        <div class="hint" style="font-size:11px;color:var(--ink-dim);margin-top:6px;">"Max sur la tôle" = nombre maximum de cette pièce seule sur une tôle vierge (calculé automatiquement). Clique "Utiliser" pour remplir la quantité avec ce nombre.</div>
       ` : `<div class="empty" style="margin-top:14px;padding:24px;"><b>Aucune pièce ajoutée</b>Charge un fichier ou ajoute une pièce manuellement.</div>`}
 
       <div class="modal-actions" style="justify-content:flex-start;">
@@ -1205,9 +1225,9 @@ function renderImbrication(){
     <div id="nest-result"></div>
   `;
 
-  document.getElementById('nest-sheet-l').onchange = (e)=>{ nestSheet.longueur = parseInt(e.target.value)||2000; };
-  document.getElementById('nest-sheet-w').onchange = (e)=>{ nestSheet.largeur = parseInt(e.target.value)||1000; };
-  document.getElementById('nest-gap').onchange = (e)=>{ nestGap = parseInt(e.target.value)||0; };
+  document.getElementById('nest-sheet-l').onchange = (e)=>{ nestSheet.longueur = parseInt(e.target.value)||2000; renderImbrication(); };
+  document.getElementById('nest-sheet-w').onchange = (e)=>{ nestSheet.largeur = parseInt(e.target.value)||1000; renderImbrication(); };
+  document.getElementById('nest-gap').onchange = (e)=>{ nestGap = parseInt(e.target.value)||0; renderImbrication(); };
 
   document.getElementById('nest-file').onchange = async (e)=>{
     const file = e.target.files[0];
@@ -1238,12 +1258,19 @@ function renderImbrication(){
   view.querySelectorAll('[data-nest-remove]').forEach(btn=>{
     btn.onclick = ()=>{ nestParts = nestParts.filter(p=>p.id!==btn.dataset.nestRemove); renderImbrication(); };
   });
+  view.querySelectorAll('[data-nest-usemax]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const p = nestParts.find(x=>x.id===btn.dataset.nestUsemax);
+      if(p){ p.qte = Math.max(1, parseInt(btn.dataset.nestMax)||1); renderImbrication(); }
+    };
+  });
   view.querySelectorAll('[data-nest-field]').forEach(inp=>{
     inp.onchange = ()=>{
       const p = nestParts.find(x=>x.id===inp.dataset.nestId);
       if(!p) return;
       const f = inp.dataset.nestField;
       p[f] = (f==='nom') ? inp.value : (parseInt(inp.value)||0);
+      renderImbrication();
     };
   });
 
