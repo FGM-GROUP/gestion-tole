@@ -306,11 +306,12 @@
   <div class="brand">TÔLE<span>RIE</span></div>
   <div class="brand-sub">Gestion de stock</div>
   <nav>
-    <button class="nav-btn active" data-tab="inventaire"><span class="num">01</span> Inventaire</button>
-    <button class="nav-btn" data-tab="zones"><span class="num">02</span> Zones</button>
-    <button class="nav-btn" data-tab="scanner"><span class="num">03</span> Scanner QR</button>
-    <button class="nav-btn" data-tab="parametres"><span class="num">04</span> Paramètres</button>
+    <button class="nav-btn active" data-tab="parametres"><span class="num">01</span> Paramètres</button>
+    <button class="nav-btn" data-tab="inventaire"><span class="num">02</span> Inventaire</button>
+    <button class="nav-btn" data-tab="zones"><span class="num">03</span> Zones</button>
+    <button class="nav-btn" data-tab="scanner"><span class="num">04</span> Scanner QR</button>
     <button class="nav-btn" data-tab="imbrication"><span class="num">05</span> Imbrication</button>
+    <button class="nav-btn" data-tab="decoupelaser"><span class="num">06</span> Découpe laser</button>
   </nav>
   <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span>Connexion…</div>
 </div>
@@ -329,7 +330,7 @@
 let toles = [];
 let zones = [];
 let settings = { paletteStart: 1, defaultLongueur: 1000, defaultLargeur: 1000, defaultEpaisseur: 1, defaultMatiere: 'Acier', defaultSeuil: 1 };
-let currentTab = 'inventaire';
+let currentTab = 'parametres';
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -504,6 +505,7 @@ function render(){
   else if(currentTab === 'scanner') renderScanner();
   else if(currentTab === 'parametres') renderParametres();
   else if(currentTab === 'imbrication') renderImbrication();
+  else if(currentTab === 'decoupelaser') renderDecoupeLaser();
 }
 
 /* Utilisée par les écouteurs temps réel : on évite de redessiner l'onglet Scanner
@@ -1331,6 +1333,169 @@ function renderNestResult(result){
       </div>
     </div>
   `;
+}
+
+/* ---------------------------------------------------------
+   DÉCOUPE LASER — lecture DXF, longueur de coupe et temps estimé
+--------------------------------------------------------- */
+let laserParams = { vitesse: 3000, tempsPercage: 0.5, vitesseRapide: 15000 };
+let laserResult = null;
+let laserFileName = '';
+
+const LASER_PRESETS = [
+  { label: 'Acier — 1 mm', vitesse: 6000 },
+  { label: 'Acier — 2 mm', vitesse: 4000 },
+  { label: 'Acier — 3 mm', vitesse: 3000 },
+  { label: 'Acier — 5 mm', vitesse: 1800 },
+  { label: 'Acier — 8 mm', vitesse: 1000 },
+  { label: 'Inox — 1 mm', vitesse: 5000 },
+  { label: 'Inox — 2 mm', vitesse: 3000 },
+  { label: 'Inox — 3 mm', vitesse: 2000 },
+  { label: 'Aluminium — 1 mm', vitesse: 4000 },
+  { label: 'Aluminium — 2 mm', vitesse: 2500 },
+  { label: 'Aluminium — 3 mm', vitesse: 1500 },
+];
+
+function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
+
+function analyzeDxfForLaser(text){
+  const parser = new DxfParser();
+  const dxf = parser.parseSync(text);
+  const entities = dxf.entities || [];
+  let totalLength = 0;
+  let pierces = 0;
+
+  entities.forEach(e=>{
+    if(e.type === 'LINE' && e.vertices && e.vertices.length>=2){
+      totalLength += dist(e.vertices[0].x,e.vertices[0].y,e.vertices[1].x,e.vertices[1].y);
+      pierces++;
+    }
+    else if((e.type === 'LWPOLYLINE' || e.type === 'POLYLINE') && e.vertices && e.vertices.length>1){
+      for(let i=0;i<e.vertices.length-1;i++){
+        totalLength += dist(e.vertices[i].x,e.vertices[i].y,e.vertices[i+1].x,e.vertices[i+1].y);
+      }
+      if(e.shape || e.closed){
+        totalLength += dist(e.vertices[e.vertices.length-1].x,e.vertices[e.vertices.length-1].y,e.vertices[0].x,e.vertices[0].y);
+      }
+      pierces++;
+    }
+    else if(e.type === 'CIRCLE' && e.center && e.radius){
+      totalLength += 2*Math.PI*e.radius;
+      pierces++;
+    }
+    else if(e.type === 'ARC' && e.center && e.radius!=null){
+      let a1 = e.startAngle, a2 = e.endAngle;
+      let sweep = a2 - a1;
+      if(sweep < 0) sweep += 2*Math.PI;
+      totalLength += e.radius * sweep;
+      pierces++;
+    }
+    else if(e.type === 'SPLINE' && e.controlPoints && e.controlPoints.length>1){
+      for(let i=0;i<e.controlPoints.length-1;i++){
+        totalLength += dist(e.controlPoints[i].x,e.controlPoints[i].y,e.controlPoints[i+1].x,e.controlPoints[i+1].y);
+      }
+      pierces++;
+    }
+    else if(e.type === 'ELLIPSE' && e.center && e.majorAxisEndPoint){
+      const a = Math.hypot(e.majorAxisEndPoint.x, e.majorAxisEndPoint.y);
+      const b = a * (e.axisRatio || 1);
+      totalLength += Math.PI*(3*(a+b) - Math.sqrt((3*a+b)*(a+3*b))); // approximation de Ramanujan
+      pierces++;
+    }
+  });
+
+  if(pierces === 0) throw new Error('Aucune géométrie de découpe exploitable trouvée dans ce DXF.');
+  return { totalLength, pierces };
+}
+
+function laserCompute(){
+  if(!laserResult) return null;
+  const v = laserParams.vitesse || 1;
+  const tempsCoupeMin = laserResult.totalLength / v;
+  const tempsPercageMin = (laserResult.pierces * laserParams.tempsPercage) / 60;
+  const tempsTotalMin = tempsCoupeMin + tempsPercageMin;
+  return { tempsCoupeMin, tempsPercageMin, tempsTotalMin };
+}
+
+function fmtMin(min){
+  const totalSec = Math.round(min*60);
+  const m = Math.floor(totalSec/60), s = totalSec%60;
+  return `${m} min ${String(s).padStart(2,'0')} s`;
+}
+
+function renderDecoupeLaser(){
+  const view = document.getElementById('view');
+  const calc = laserCompute();
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Découpe</div>
+        <h1>Découpe laser</h1>
+        <div class="lede">Charge un fichier DXF pour estimer la longueur de coupe, le nombre de perçages et le temps de découpe.</div>
+      </div>
+    </header>
+
+    <div class="modal" style="max-width:640px;margin:0 0 24px;box-shadow:none;">
+      <div class="field">
+        <label>Fichier DXF</label>
+        <input type="file" id="laser-file" accept=".dxf">
+        ${laserFileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(laserFileName)}</span>` : ''}
+      </div>
+
+      <div class="field">
+        <label>Préréglage matière / épaisseur <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(valeurs indicatives — ajuste selon ta machine)</span></label>
+        <select id="laser-preset">
+          <option value="">— Réglage manuel —</option>
+          ${LASER_PRESETS.map((p,i)=>`<option value="${i}" ${laserParams.vitesse===p.vitesse?'selected':''}>${p.label} (${p.vitesse} mm/min)</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="grid2">
+        <div class="field"><label>Vitesse de coupe (mm/min)</label><input type="number" id="laser-vitesse" value="${laserParams.vitesse}" min="1"></div>
+        <div class="field"><label>Temps de perçage (s / perçage)</label><input type="number" step="0.1" id="laser-percage" value="${laserParams.tempsPercage}" min="0"></div>
+      </div>
+    </div>
+
+    ${laserResult ? `
+      <div class="modal" style="max-width:640px;margin:0;box-shadow:none;">
+        <div class="grid2" style="margin-bottom:16px;">
+          <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${(laserResult.totalLength/1000).toFixed(2)} m</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">longueur totale de découpe</div></div>
+          <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${laserResult.pierces}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">perçages (nombre de contours)</div></div>
+        </div>
+        <div class="grid2" style="margin-bottom:16px;">
+          <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${fmtMin(calc.tempsCoupeMin)}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">temps de coupe</div></div>
+          <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${fmtMin(calc.tempsPercageMin)}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">temps de perçage cumulé</div></div>
+        </div>
+        <div class="result-card" style="text-align:center;">
+          <div style="font-size:12px;color:var(--ink-dim);">Temps total estimé</div>
+          <div style="font-family:var(--display);font-size:30px;color:var(--accent);margin-top:4px;">${fmtMin(calc.tempsTotalMin)}</div>
+        </div>
+      </div>
+    ` : `<div class="empty" style="padding:36px 24px;"><b>Aucun fichier chargé</b>Charge un DXF pour voir l'estimation du temps de découpe.</div>`}
+  `;
+
+  document.getElementById('laser-preset').onchange = (e)=>{
+    const idx = e.target.value;
+    if(idx !== ''){ laserParams.vitesse = LASER_PRESETS[idx].vitesse; }
+    renderDecoupeLaser();
+  };
+  document.getElementById('laser-vitesse').onchange = (e)=>{ laserParams.vitesse = parseFloat(e.target.value)||1; renderDecoupeLaser(); };
+  document.getElementById('laser-percage').onchange = (e)=>{ laserParams.tempsPercage = parseFloat(e.target.value)||0; renderDecoupeLaser(); };
+
+  document.getElementById('laser-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      const text = await file.text();
+      laserResult = analyzeDxfForLaser(text);
+      laserFileName = file.name;
+      toast('Fichier DXF analysé');
+      renderDecoupeLaser();
+    }catch(err){
+      console.error(err);
+      toast('Impossible de lire ce fichier : ' + err.message);
+    }
+  };
 }
 
 function renderScanner(){
