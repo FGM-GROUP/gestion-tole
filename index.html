@@ -1349,23 +1349,15 @@ function renderNestResult(result){
 /* ---------------------------------------------------------
    DÉCOUPE LASER — lecture DXF, longueur de coupe et temps estimé
 --------------------------------------------------------- */
-let laserParams = { vitesse: 3000, tempsPercage: 0.5, vitesseRapide: 15000 };
+let laserParams = { vitesse: 3000, tempsPercage: 0.5, vitesseRapide: 15000, matiere: 'Acier', epaisseur: 3 };
 let laserResult = null;
 let laserFileName = '';
 
-const LASER_PRESETS = [
-  { label: 'Acier — 1 mm', vitesse: 6000 },
-  { label: 'Acier — 2 mm', vitesse: 4000 },
-  { label: 'Acier — 3 mm', vitesse: 3000 },
-  { label: 'Acier — 5 mm', vitesse: 1800 },
-  { label: 'Acier — 8 mm', vitesse: 1000 },
-  { label: 'Inox — 1 mm', vitesse: 5000 },
-  { label: 'Inox — 2 mm', vitesse: 3000 },
-  { label: 'Inox — 3 mm', vitesse: 2000 },
-  { label: 'Aluminium — 1 mm', vitesse: 4000 },
-  { label: 'Aluminium — 2 mm', vitesse: 2500 },
-  { label: 'Aluminium — 3 mm', vitesse: 1500 },
-];
+const LASER_PRESETS = {
+  'Acier':      { 1: 6000, 2: 4000, 3: 3000, 5: 1800, 8: 1000 },
+  'Inox':       { 1: 5000, 2: 3000, 3: 2000 },
+  'Aluminium':  { 1: 4000, 2: 2500, 3: 1500 },
+};
 
 function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
 
@@ -1598,12 +1590,19 @@ function renderDecoupeLaser(){
         ${laserFileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(laserFileName)}</span>` : ''}
       </div>
 
-      <div class="field">
-        <label>Préréglage matière / épaisseur <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(valeurs indicatives — ajuste selon ta machine)</span></label>
-        <select id="laser-preset">
-          <option value="">— Réglage manuel —</option>
-          ${LASER_PRESETS.map((p,i)=>`<option value="${i}" ${laserParams.vitesse===p.vitesse?'selected':''}>${p.label} (${p.vitesse} mm/min)</option>`).join('')}
-        </select>
+      <div class="grid2">
+        <div class="field">
+          <label>Matière</label>
+          <select id="laser-matiere">
+            ${Object.keys(LASER_PRESETS).map(m=>`<option value="${escapeHtml(m)}" ${laserParams.matiere===m?'selected':''}>${escapeHtml(m)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Épaisseur (mm) <span style="text-transform:none;letter-spacing:0;color:var(--ink-dim);font-weight:400;">(vitesses indicatives — ajuste selon ta machine)</span></label>
+          <select id="laser-epaisseur">
+            ${Object.keys(LASER_PRESETS[laserParams.matiere]).map(ep=>`<option value="${ep}" ${String(laserParams.epaisseur)===ep?'selected':''}>${ep} mm</option>`).join('')}
+          </select>
+        </div>
       </div>
 
       <div class="grid2">
@@ -1641,9 +1640,16 @@ function renderDecoupeLaser(){
     ` : `<div class="empty" style="padding:36px 24px;"><b>Aucun fichier chargé</b>Charge un DXF pour voir l'estimation du temps de découpe.</div>`}
   `;
 
-  document.getElementById('laser-preset').onchange = (e)=>{
-    const idx = e.target.value;
-    if(idx !== ''){ laserParams.vitesse = LASER_PRESETS[idx].vitesse; }
+  document.getElementById('laser-matiere').onchange = (e)=>{
+    laserParams.matiere = e.target.value;
+    const epaisseurs = Object.keys(LASER_PRESETS[laserParams.matiere]).map(Number);
+    if(!epaisseurs.includes(laserParams.epaisseur)) laserParams.epaisseur = epaisseurs[0];
+    laserParams.vitesse = LASER_PRESETS[laserParams.matiere][laserParams.epaisseur];
+    renderDecoupeLaser();
+  };
+  document.getElementById('laser-epaisseur').onchange = (e)=>{
+    laserParams.epaisseur = Number(e.target.value);
+    laserParams.vitesse = LASER_PRESETS[laserParams.matiere][laserParams.epaisseur];
     renderDecoupeLaser();
   };
   document.getElementById('laser-vitesse').onchange = (e)=>{ laserParams.vitesse = parseFloat(e.target.value)||1; renderDecoupeLaser(); };
