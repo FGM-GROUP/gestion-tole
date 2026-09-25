@@ -16,6 +16,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/dxf-parser.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
@@ -309,6 +310,7 @@
     <button class="nav-btn" data-tab="zones"><span class="num">02</span> Zones</button>
     <button class="nav-btn" data-tab="scanner"><span class="num">03</span> Scanner QR</button>
     <button class="nav-btn" data-tab="parametres"><span class="num">04</span> Paramètres</button>
+    <button class="nav-btn" data-tab="imbrication"><span class="num">05</span> Imbrication</button>
   </nav>
   <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span>Connexion…</div>
 </div>
@@ -485,6 +487,7 @@ function render(){
   else if(currentTab === 'zones') renderZones();
   else if(currentTab === 'scanner') renderScanner();
   else if(currentTab === 'parametres') renderParametres();
+  else if(currentTab === 'imbrication') renderImbrication();
 }
 
 /* ---------------------------------------------------------
@@ -1019,6 +1022,264 @@ function renderParametres(){
     await saveSettings();
     toast('Paramètres enregistrés');
   };
+}
+
+/* ---------------------------------------------------------
+   IMBRICATION
+--------------------------------------------------------- */
+let nestSheet = { longueur: 2000, largeur: 1000 };
+let nestGap = 5;
+let nestParts = []; // { id, nom, longueur, largeur, qte, source }
+
+function parseDxfBoundingBox(text){
+  const parser = new DxfParser();
+  const dxf = parser.parseSync(text);
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  function pt(x,y){ if(x<minX)minX=x; if(x>maxX)maxX=x; if(y<minY)minY=y; if(y>maxY)maxY=y; }
+  (dxf.entities||[]).forEach(e=>{
+    if(e.vertices){ e.vertices.forEach(v=>pt(v.x,v.y)); }
+    if(e.startPoint) pt(e.startPoint.x, e.startPoint.y);
+    if(e.endPoint) pt(e.endPoint.x, e.endPoint.y);
+    if(e.center && e.radius!=null){ pt(e.center.x-e.radius, e.center.y-e.radius); pt(e.center.x+e.radius, e.center.y+e.radius); }
+    if(e.position) pt(e.position.x, e.position.y);
+  });
+  if(!isFinite(minX)) throw new Error('Aucune géométrie exploitable trouvée dans le DXF.');
+  return { longueur: Math.round(maxX-minX), largeur: Math.round(maxY-minY) };
+}
+
+function parseStepBoundingBoxApprox(text){
+  const re = /CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]+)\)/g;
+  let m, minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  while((m = re.exec(text))){
+    const parts = m[1].split(',').map(s=>parseFloat(s.trim()));
+    if(parts.length>=2 && isFinite(parts[0]) && isFinite(parts[1])){
+      if(parts[0]<minX)minX=parts[0]; if(parts[0]>maxX)maxX=parts[0];
+      if(parts[1]<minY)minY=parts[1]; if(parts[1]>maxY)maxY=parts[1];
+    }
+  }
+  if(!isFinite(minX)) throw new Error('Aucun point exploitable trouvé dans le fichier STEP.');
+  return { longueur: Math.round(maxX-minX), largeur: Math.round(maxY-minY) };
+}
+
+/* Algorithme MaxRects (Maximal Rectangles, Best-Short-Side-Fit) avec rotation 90°,
+   nettement plus performant qu'un simple rangement par rangées. */
+function packMaxRects(sheetL, sheetW, units, gap){
+  let freeRects = [{x:0, y:0, w:sheetL, h:sheetW}];
+  const placed = [];
+  const unplaced = [];
+
+  function isContainedIn(a,b){
+    return a.x>=b.x && a.y>=b.y && a.x+a.w<=b.x+b.w && a.y+a.h<=b.y+b.h;
+  }
+  function pruneFreeList(){
+    for(let i=0;i<freeRects.length;i++){
+      for(let j=i+1;j<freeRects.length;j++){
+        if(isContainedIn(freeRects[i], freeRects[j])){ freeRects.splice(i,1); i--; break; }
+        if(isContainedIn(freeRects[j], freeRects[i])){ freeRects.splice(j,1); j--; }
+      }
+    }
+  }
+  function splitFreeNode(fr, used){
+    if(used.x >= fr.x+fr.w || used.x+used.w <= fr.x || used.y >= fr.y+fr.h || used.y+used.h <= fr.y) return null;
+    const out = [];
+    if(used.x > fr.x) out.push({x:fr.x, y:fr.y, w:used.x-fr.x, h:fr.h});
+    if(used.x+used.w < fr.x+fr.w) out.push({x:used.x+used.w, y:fr.y, w:fr.x+fr.w-(used.x+used.w), h:fr.h});
+    if(used.y > fr.y) out.push({x:fr.x, y:fr.y, w:fr.w, h:used.y-fr.y});
+    if(used.y+used.h < fr.y+fr.h) out.push({x:fr.x, y:used.y+used.h, w:fr.w, h:fr.y+fr.h-(used.y+used.h)});
+    return out;
+  }
+  function findPosition(w, h){
+    let bestShort=Infinity, bestLong=Infinity, best=null, bestRotated=false;
+    freeRects.forEach(fr=>{
+      if(fr.w >= w && fr.h >= h){
+        const sf = Math.min(fr.w-w, fr.h-h), lf = Math.max(fr.w-w, fr.h-h);
+        if(sf < bestShort || (sf===bestShort && lf<bestLong)){ bestShort=sf; bestLong=lf; best={x:fr.x,y:fr.y,w,h}; bestRotated=false; }
+      }
+      if(fr.w >= h && fr.h >= w){
+        const sf = Math.min(fr.w-h, fr.h-w), lf = Math.max(fr.w-h, fr.h-w);
+        if(sf < bestShort || (sf===bestShort && lf<bestLong)){ bestShort=sf; bestLong=lf; best={x:fr.x,y:fr.y,w:h,h:w}; bestRotated=true; }
+      }
+    });
+    return best ? {rect:best, rotated:bestRotated} : null;
+  }
+
+  units.forEach(u=>{
+    const gw = u.w + gap, gh = u.h + gap;
+    const found = findPosition(gw, gh);
+    if(!found){ unplaced.push(u); return; }
+    const node = found.rect;
+    placed.push({ nom:u.nom, x:node.x, y:node.y, w: found.rotated ? u.h : u.w, h: found.rotated ? u.w : u.h, rotated: found.rotated });
+    const numFree = freeRects.length;
+    for(let i=0;i<numFree;i++){
+      const splits = splitFreeNode(freeRects[i], node);
+      if(splits){ freeRects.splice(i,1); i--; freeRects.push(...splits); }
+    }
+    pruneFreeList();
+  });
+
+  return { placed, unplaced };
+}
+
+function nestCompute(){
+  const sheetL = nestSheet.longueur, sheetW = nestSheet.largeur, gap = nestGap;
+  const baseUnits = [];
+  nestParts.forEach(p=>{
+    for(let i=0;i<p.qte;i++) baseUnits.push({ partId:p.id, nom:p.nom, l:p.longueur, w:p.largeur });
+  });
+
+  // On essaie plusieurs stratégies de tri et on garde la meilleure imbrication obtenue.
+  const strategies = [
+    (a,b)=> (b.l*b.w) - (a.l*a.w),                 // surface décroissante
+    (a,b)=> Math.max(b.l,b.w) - Math.max(a.l,a.w), // plus grand côté décroissant
+    (a,b)=> Math.min(b.l,b.w) - Math.min(a.l,a.w), // plus petit côté décroissant
+    (a,b)=> (b.l+b.w) - (a.l+a.w),                 // périmètre décroissant
+  ];
+
+  let best = null;
+  strategies.forEach(cmp=>{
+    const normalized = baseUnits.slice().sort(cmp).map(u=>({ nom:u.nom, w:u.l, h:u.w }));
+    const result = packMaxRects(sheetL, sheetW, normalized, gap);
+    const surfaceUtile = result.placed.reduce((s,p)=>s+p.w*p.h,0);
+    const score = result.placed.length*1e9 + surfaceUtile; // priorité : nb de pièces placées, puis surface utilisée
+    if(!best || score > best.score){ best = { ...result, score }; }
+  });
+
+  const surfaceFeuille = sheetL * sheetW;
+  const surfaceUtile = best.placed.reduce((s,p)=>s+p.w*p.h,0);
+  const taux = surfaceFeuille>0 ? Math.round(surfaceUtile/surfaceFeuille*1000)/10 : 0;
+  return { placed: best.placed, unplaced: best.unplaced, taux, totalDemande: baseUnits.length };
+}
+
+
+function renderImbrication(){
+  const view = document.getElementById('view');
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Découpe</div>
+        <h1>Imbrication</h1>
+        <div class="lede">Place tes pièces (lues depuis un fichier DXF ou STEP) sur une tôle aux dimensions de ton choix.</div>
+      </div>
+    </header>
+
+    <div class="modal" style="max-width:640px;margin:0 0 24px;box-shadow:none;">
+      <div class="grid2">
+        <div class="field"><label>Longueur de la tôle (mm)</label><input type="number" id="nest-sheet-l" value="${nestSheet.longueur}"></div>
+        <div class="field"><label>Largeur de la tôle (mm)</label><input type="number" id="nest-sheet-w" value="${nestSheet.largeur}"></div>
+      </div>
+      <div class="field"><label>Espacement entre pièces (mm)</label><input type="number" id="nest-gap" value="${nestGap}" min="0"></div>
+
+      <div class="field">
+        <label>Ajouter une pièce depuis un fichier DXF ou STEP</label>
+        <input type="file" id="nest-file" accept=".dxf,.step,.stp">
+        <span class="hint" id="nest-file-hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Le DXF donne le contour réel (précis). Le STEP est lu de façon approximative (boîte englobante à partir des points 3D) — vérifie les dimensions obtenues.</span>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn" id="nest-add-manual">+ Ajouter une pièce manuellement</button>
+      </div>
+
+      ${nestParts.length ? `
+        <div class="table-wrap" style="margin-top:16px;">
+        <table>
+          <thead><tr><th>Pièce</th><th>Longueur</th><th>Largeur</th><th>Qté</th><th></th></tr></thead>
+          <tbody>
+            ${nestParts.map(p=>`
+              <tr>
+                <td><input type="text" data-nest-field="nom" data-nest-id="${p.id}" value="${escapeHtml(p.nom)}" style="width:100%;"></td>
+                <td><input type="number" data-nest-field="longueur" data-nest-id="${p.id}" value="${p.longueur}" style="width:80px;"></td>
+                <td><input type="number" data-nest-field="largeur" data-nest-id="${p.id}" value="${p.largeur}" style="width:80px;"></td>
+                <td><input type="number" data-nest-field="qte" data-nest-id="${p.id}" value="${p.qte}" min="1" style="width:60px;"></td>
+                <td><div class="row-actions"><button class="btn ghost small" data-nest-remove="${p.id}">Retirer</button></div></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+        </div>
+      ` : `<div class="empty" style="margin-top:14px;padding:24px;"><b>Aucune pièce ajoutée</b>Charge un fichier ou ajoute une pièce manuellement.</div>`}
+
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn primary" id="nest-calc" ${nestParts.length?'':'disabled'}>Calculer l'imbrication</button>
+      </div>
+    </div>
+
+    <div id="nest-result"></div>
+  `;
+
+  document.getElementById('nest-sheet-l').onchange = (e)=>{ nestSheet.longueur = parseInt(e.target.value)||2000; };
+  document.getElementById('nest-sheet-w').onchange = (e)=>{ nestSheet.largeur = parseInt(e.target.value)||1000; };
+  document.getElementById('nest-gap').onchange = (e)=>{ nestGap = parseInt(e.target.value)||0; };
+
+  document.getElementById('nest-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    try{
+      const text = await file.text();
+      let dims;
+      if(ext === 'dxf'){
+        dims = parseDxfBoundingBox(text);
+      }else{
+        dims = parseStepBoundingBoxApprox(text);
+      }
+      nestParts.push({ id: uid(), nom: file.name.replace(/\.(dxf|step|stp)$/i,''), longueur: dims.longueur, largeur: dims.largeur, qte: 1, source: ext });
+      toast(`Pièce ajoutée : ${dims.longueur} × ${dims.largeur} mm`);
+      renderImbrication();
+    }catch(err){
+      console.error(err);
+      toast('Impossible de lire ce fichier : ' + err.message);
+    }
+  };
+
+  document.getElementById('nest-add-manual').onclick = ()=>{
+    nestParts.push({ id: uid(), nom: 'Pièce', longueur: 300, largeur: 200, qte: 1, source: 'manuel' });
+    renderImbrication();
+  };
+
+  view.querySelectorAll('[data-nest-remove]').forEach(btn=>{
+    btn.onclick = ()=>{ nestParts = nestParts.filter(p=>p.id!==btn.dataset.nestRemove); renderImbrication(); };
+  });
+  view.querySelectorAll('[data-nest-field]').forEach(inp=>{
+    inp.onchange = ()=>{
+      const p = nestParts.find(x=>x.id===inp.dataset.nestId);
+      if(!p) return;
+      const f = inp.dataset.nestField;
+      p[f] = (f==='nom') ? inp.value : (parseInt(inp.value)||0);
+    };
+  });
+
+  document.getElementById('nest-calc').onclick = ()=>{
+    const result = nestCompute();
+    renderNestResult(result);
+  };
+}
+
+function renderNestResult(result){
+  const el = document.getElementById('nest-result');
+  const sheetL = nestSheet.longueur, sheetW = nestSheet.largeur;
+  const scale = Math.min(760/sheetL, 420/sheetW);
+  const svgParts = result.placed.map(p=>`
+    <rect x="${p.x*scale}" y="${p.y*scale}" width="${p.w*scale}" height="${p.h*scale}" fill="rgba(91,147,179,0.35)" stroke="var(--blue)" stroke-width="1"/>
+    <text x="${(p.x+p.w/2)*scale}" y="${(p.y+p.h/2)*scale}" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="var(--ink)">${escapeHtml(p.nom)}${p.rotated?' ↻':''}</text>
+  `).join('');
+
+  el.innerHTML = `
+    <div class="modal" style="max-width:800px;margin:0;box-shadow:none;">
+      <div class="grid2" style="margin-bottom:16px;">
+        <div class="result-card"><div style="font-family:var(--display);font-size:26px;color:var(--ink);">${result.placed.length}/${result.totalDemande}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">pièces placées</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:26px;color:var(--ink);">${result.taux}%</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">taux d'utilisation</div></div>
+      </div>
+      ${result.unplaced.length ? `<div style="color:var(--danger);margin-bottom:10px;font-size:13px;">${result.unplaced.length} pièce(s) ne rentrent pas sur cette tôle — augmente ses dimensions ou réduis les quantités.</div>` : ''}
+      <div style="overflow-x:auto;">
+        <svg width="${sheetL*scale}" height="${sheetW*scale}" style="background:#fff;border:1px solid var(--line);">
+          <rect x="0" y="0" width="${sheetL*scale}" height="${sheetW*scale}" fill="#fff" stroke="var(--ink-dim)"/>
+          ${svgParts}
+        </svg>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn" onclick="window.print()">Imprimer le plan</button>
+      </div>
+    </div>
+  `;
 }
 
 function renderScanner(){
