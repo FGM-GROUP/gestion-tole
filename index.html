@@ -2625,7 +2625,8 @@ function renderEmbPieceForm(){
 function defaultEmbOutil(){
   return {
     nom: '',
-    pieceLongueur: 800, pieceLargeur: 250, pieceHauteur: 120,
+    pieceLongueur: 0, pieceLargeur: 0, pieceHauteur: 0,
+    pieceFileName: '',
     hasSerreFlan: true,
     matMatrice: 0, matPoincon: 0, matSerreFlan: 0,
     moRows: [
@@ -2864,6 +2865,7 @@ function renderEmbOutilForm(){
       <div class="field">
         <label>Charger la pièce depuis un fichier STEP (prévoir 5 à 10/10 mm de plus par pièce)</label>
         <input type="file" id="eo-step-file" accept=".step,.stp">
+        ${o.pieceFileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(o.pieceFileName)}</span>` : ''}
         <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Lecture approximative (boîte englobante à partir des points 3D) — vérifie les 3 dimensions obtenues et corrige-les si besoin.</span>
       </div>
       <div class="grid3">
@@ -2979,6 +2981,7 @@ function renderEmbOutilForm(){
       const text = await file.text();
       const bbox = parseStepBoundingBox3D(text);
       o.pieceLongueur = bbox.longueur; o.pieceLargeur = bbox.largeur; o.pieceHauteur = bbox.hauteur;
+      o.pieceFileName = file.name;
       toast(`Pièce lue : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm (volume ≈ ${bbox.volume.toFixed(5)} m³)`);
       renderEmbOutilForm();
     }catch(err){
