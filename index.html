@@ -2655,6 +2655,7 @@ function defaultEmbOutil(){
     symetrique: false,
     symetrieAxe: 'X',
     prixKgMatiere: 4,
+    prixUsinageM3: null, // null = suit le prix moyen /m³ de l'abaque d'usinage, modifiable
     moRows: [
       { key:'programmation', label:'Programmation', enabled:true, hg:1, chg:60, hd:1, chd:60 },
       { key:'cao', label:'CAO', enabled:true, hg:8, chg:75, hd:8, chd:75 },
@@ -2731,10 +2732,6 @@ function computeOutil(o){
   const hasSerreFlan = o.hasSerreFlan !== false;
   const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? (o.pieceHauteur+30) : 0;
 
-  const matriceMatch = findAbaqueMatch(matriceL, matriceW, matriceH);
-  const poinconMatch = findAbaqueMatch(poinconL, poinconW, poinconH);
-  const serreFlanMatch = hasSerreFlan ? findAbaqueMatch(serreFlanL, serreFlanW, serreFlanH) : null;
-
   // Coût matière = volume (m³) × densité acier (kg/m³) = poids (kg) × prix/kg (42CMD8, par défaut 4€).
   const prixKg = o.prixKgMatiere != null ? o.prixKgMatiere : 4;
   const matriceVolume = matriceL*matriceW*matriceH*1e-9;
@@ -2749,13 +2746,28 @@ function computeOutil(o){
 
   const matiereTotal = matriceCoutMatiere + poinconCoutMatiere + serreFlanCoutMatiere;
 
-  // Le temps d'usinage par défaut s'appuie sur l'abaque (nb heures usinage du bloc matrice le plus proche)
-  // tant que l'utilisateur n'a pas saisi sa propre valeur sur la ligne "Usinage".
+  // Coût d'usinage de la matrice et du poinçon = leur volume (m³) × le prix moyen au m³ de
+  // l'abaque d'usinage (par défaut) — modifiable. Le temps (heures) qui en découle vient
+  // alimenter automatiquement la ligne "Usinage" de la main d'oeuvre, tant que l'utilisateur
+  // n'a pas saisi sa propre valeur.
+  const prixUsinageM3 = o.prixUsinageM3 != null ? o.prixUsinageM3 : abaqueMoyennePrixM3();
+  const matriceCoutUsinage = matriceVolume*prixUsinageM3;
+  const poinconCoutUsinage = poinconVolume*prixUsinageM3;
+  const usinageRowDef = (o.moRows||[]).find(r=>r.key==='usinage') || {};
+  const tarifUsinageG = usinageRowDef.chg || 120;
+  const tarifUsinageD = usinageRowDef.chd || 120;
+  const matriceHeuresUsinageG = tarifUsinageG>0 ? matriceCoutUsinage/tarifUsinageG : 0;
+  const poinconHeuresUsinageG = tarifUsinageG>0 ? poinconCoutUsinage/tarifUsinageG : 0;
+  const matriceHeuresUsinageD = tarifUsinageD>0 ? matriceCoutUsinage/tarifUsinageD : 0;
+  const poinconHeuresUsinageD = tarifUsinageD>0 ? poinconCoutUsinage/tarifUsinageD : 0;
+  const heuresUsinageAutoG = matriceHeuresUsinageG + poinconHeuresUsinageG;
+  const heuresUsinageAutoD = matriceHeuresUsinageD + poinconHeuresUsinageD;
+
   const rows = (o.moRows||[]).map(r=>{
     const on = r.enabled !== false;
     let hg = r.hg, hd = r.hd;
-    if(r.key==='usinage' && (hg==null || hg==='') && matriceMatch) hg = matriceMatch.nbHeureUsinage;
-    if(r.key==='usinage' && (hd==null || hd==='') && matriceMatch) hd = matriceMatch.nbHeureUsinage;
+    if(r.key==='usinage' && (hg==null || hg==='')) hg = heuresUsinageAutoG;
+    if(r.key==='usinage' && (hd==null || hd==='')) hd = heuresUsinageAutoD;
     hg = hg||0; hd = hd||0;
     return Object.assign({}, r, { hg, hd, totG: on ? hg*(r.chg||0) : 0, totD: on ? hd*(r.chd||0) : 0 });
   });
@@ -2765,11 +2777,12 @@ function computeOutil(o){
   const totalMainD = sumD + matiereTotal;
   return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, hasSerreFlan,
     isSym, symAxe, effLongueur, effLargeur,
-    matriceMatch, poinconMatch, serreFlanMatch,
     matriceVolume, matricePoids, matriceCoutMatiere,
     poinconVolume, poinconPoids, poinconCoutMatiere,
     serreFlanVolume, serreFlanPoids, serreFlanCoutMatiere,
-    prixKg, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
+    prixKg, prixUsinageM3, matriceCoutUsinage, poinconCoutUsinage,
+    matriceHeuresUsinageG, poinconHeuresUsinageG, heuresUsinageAutoG, heuresUsinageAutoD,
+    matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
 }
 
 /* Abaque usinage outil — référence (feuille "abaque usinage outil" du classeur) */
@@ -2816,6 +2829,14 @@ const ABAQUE_USINAGE = [
   {l:800,w:500,h:270,prixMatiere:null,prixUsinage:10160,note:'FOYART'},
   {l:1000,w:600,h:300,prixMatiere:null,prixUsinage:9400,note:null},
 ];
+
+/* Prix moyen au m³ de l'abaque d'usinage (prix usinage / volume de chaque bloc, moyenné) —
+   valeur par défaut utilisée pour chiffrer l'usinage de la matrice et du poinçon à partir
+   de leur seul volume. */
+function abaqueMoyennePrixM3(){
+  const vals = ABAQUE_USINAGE.map(a=>{ const v=a.l*a.w*a.h*1e-9; return v>0 ? a.prixUsinage/v : 0; }).filter(v=>v>0);
+  return vals.length ? vals.reduce((s,v)=>s+v,0)/vals.length : 0;
+}
 
 let embOutilEditing = null;
 
@@ -2874,7 +2895,7 @@ function renderEmbOutil(){
               </tr>`;
             }).join('')}
           </tbody>
-          <tfoot><tr style="font-weight:600;"><td colspan="6">Moyenne /m³</td><td></td><td>${Math.round(ABAQUE_USINAGE.reduce((s,a)=>{const vol=a.l*a.w*a.h*1e-9; return s+(vol>0?a.prixUsinage/vol:0);},0)/ABAQUE_USINAGE.length).toLocaleString('fr-FR')} €</td><td></td></tr></tfoot>
+          <tfoot><tr style="font-weight:600;"><td colspan="6">Moyenne /m³</td><td></td><td>${Math.round(abaqueMoyennePrixM3()).toLocaleString('fr-FR')} €</td><td></td></tr></tfoot>
         </table>
       </div>
     </details>
@@ -2903,15 +2924,20 @@ function renderEmbOutilForm(){
   const o = embOutilEditing;
   const c = computeOutil(o);
 
-  const poidsCard = (title, L, W, H, volume, poids, coutMatiere, match) => `
+  const poidsCard = (title, L, W, H, volume, poids, coutMatiere) => `
     <div class="result-card">
       <div style="font-weight:600;">${title} — ${L}×${W}×${H} mm</div>
-      <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">
-        Volume : ${volume.toFixed(5)} m³ · Poids : ${poids.toFixed(2)} kg
-        ${match ? `<br>Temps d'usinage abaque (bloc ${match.ref.l}×${match.ref.w}×${match.ref.h} mm) : ${match.nbHeureUsinage.toFixed(1)} h` : ''}
-      </div>
+      <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Volume : ${volume.toFixed(5)} m³ · Poids : ${poids.toFixed(2)} kg</div>
       <div style="font-family:var(--display);font-size:20px;margin-top:8px;">${coutMatiere.toFixed(2)} €</div>
       <div style="font-size:12px;color:var(--ink-dim);">coût matière (poids × prix/kg)</div>
+    </div>`;
+
+  const usinageCard = (title, volume, cout, heures) => `
+    <div class="result-card">
+      <div style="font-weight:600;">${title}</div>
+      <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Volume : ${volume.toFixed(5)} m³ · ≈ ${heures.toFixed(1)} h au tarif retenu</div>
+      <div style="font-family:var(--display);font-size:20px;margin-top:8px;">${cout.toFixed(2)} €</div>
+      <div style="font-size:12px;color:var(--ink-dim);">coût usinage (volume × prix moyen /m³)</div>
     </div>`;
 
   view.innerHTML = `
@@ -2976,11 +3002,22 @@ function renderEmbOutilForm(){
         <input type="number" step="0.01" id="eo-prix-kg" value="${c.prixKg}" min="0">
       </div>
       <div class="grid3">
-        ${poidsCard('Matrice', c.matriceL, c.matriceW, c.matriceH, c.matriceVolume, c.matricePoids, c.matriceCoutMatiere, c.matriceMatch)}
-        ${poidsCard('Poinçon', c.poinconL, c.poinconW, c.poinconH, c.poinconVolume, c.poinconPoids, c.poinconCoutMatiere, c.poinconMatch)}
-        ${c.hasSerreFlan ? poidsCard('Serre-flan', c.serreFlanL, c.serreFlanW, c.serreFlanH, c.serreFlanVolume, c.serreFlanPoids, c.serreFlanCoutMatiere, c.serreFlanMatch) : ''}
+        ${poidsCard('Matrice', c.matriceL, c.matriceW, c.matriceH, c.matriceVolume, c.matricePoids, c.matriceCoutMatiere)}
+        ${poidsCard('Poinçon', c.poinconL, c.poinconW, c.poinconH, c.poinconVolume, c.poinconPoids, c.poinconCoutMatiere)}
+        ${c.hasSerreFlan ? poidsCard('Serre-flan', c.serreFlanL, c.serreFlanW, c.serreFlanH, c.serreFlanVolume, c.serreFlanPoids, c.serreFlanCoutMatiere) : ''}
       </div>
       <div class="result-card" style="max-width:260px;margin-top:4px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière (poids × ${c.prixKg} €/kg)</div></div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût usinage matrice &amp; poinçon — volume × prix moyen au m³</h3>
+      <div class="field" style="max-width:280px;">
+        <label>Prix moyen au m³ (abaque usinage, par défaut)</label>
+        <input type="number" step="1" id="eo-prix-usinage-m3" value="${Math.round(c.prixUsinageM3)}" min="0">
+      </div>
+      <div class="grid2">
+        ${usinageCard('Matrice', c.matriceVolume, c.matriceCoutUsinage, c.matriceHeuresUsinageG)}
+        ${usinageCard('Poinçon', c.poinconVolume, c.poinconCoutUsinage, c.poinconHeuresUsinageG)}
+      </div>
+      <div style="font-size:12px;color:var(--ink-dim);margin-top:8px;">Ce temps d'usinage (${c.heuresUsinageAutoG.toFixed(1)} h au tarif MAIN G, ${c.heuresUsinageAutoD.toFixed(1)} h au tarif MAIN D) alimente automatiquement la ligne « Usinage » ci-dessous, tant qu'elle n'est pas modifiée à la main.</div>
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Main d'oeuvre de fabrication</h3>
       <div style="font-size:12px;color:var(--ink-dim);margin-bottom:8px;">Décoche une opération si elle ne s'applique pas à cet outil. Le temps d'« Usinage » reprend par défaut le nombre d'heures de l'abaque pour le bloc matrice le plus proche — modifiable.</div>
@@ -3028,6 +3065,7 @@ function renderEmbOutilForm(){
   document.getElementById('eo-nom').onchange = (e)=>{ o.nom = e.target.value; };
   document.getElementById('eo-has-serreflan').onchange = (e)=>{ o.hasSerreFlan = e.target.checked; renderEmbOutilForm(); };
   document.getElementById('eo-prix-kg').onchange = (e)=>{ o.prixKgMatiere = parseFloat(e.target.value) || 0; renderEmbOutilForm(); };
+  document.getElementById('eo-prix-usinage-m3').onchange = (e)=>{ o.prixUsinageM3 = parseFloat(e.target.value) || 0; renderEmbOutilForm(); };
   document.getElementById('eo-symetrique').onchange = (e)=>{ o.symetrique = e.target.checked; renderEmbOutilForm(); };
   const symAxeSel = document.getElementById('eo-symetrie-axe');
   if(symAxeSel) symAxeSel.onchange = (e)=>{ o.symetrieAxe = e.target.value; renderEmbOutilForm(); };
