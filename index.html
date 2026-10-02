@@ -2730,7 +2730,7 @@ function computeOutil(o){
   const matriceL = effLongueur+160, matriceW = effLargeur+160, matriceH = o.pieceHauteur+50;
   const poinconL = effLongueur, poinconW = effLargeur, poinconH = Math.max(o.pieceHauteur+50, 100);
   const hasSerreFlan = o.hasSerreFlan !== false;
-  const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? (o.pieceHauteur+30) : 0;
+  const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? 30 : 0;
 
   // Coût matière = volume (m³) × densité acier (kg/m³) = poids (kg) × prix/kg (42CMD8, par défaut 4€).
   const prixKg = o.prixKgMatiere != null ? o.prixKgMatiere : 4;
@@ -2991,7 +2991,7 @@ function renderEmbOutilForm(){
           <tbody>
             <tr><td>Longueur (pièce +160)</td><td>${c.matriceL} mm</td><td>${c.poinconL} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanL} mm</td>`:''}</tr>
             <tr><td>Largeur (pièce +160)</td><td>${c.matriceW} mm</td><td>${c.poinconW} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanW} mm</td>`:''}</tr>
-            <tr><td>Hauteur</td><td>${c.matriceH} mm (pièce +50)</td><td>${c.poinconH} mm (pièce +50, mini 100)</td>${c.hasSerreFlan?`<td>${c.serreFlanH} mm (pièce +30)</td>`:''}</tr>
+            <tr><td>Hauteur</td><td>${c.matriceH} mm (pièce +50)</td><td>${c.poinconH} mm (pièce +50, mini 100)</td>${c.hasSerreFlan?`<td>${c.serreFlanH} mm (fixe)</td>`:''}</tr>
           </tbody>
         </table>
       </div>
