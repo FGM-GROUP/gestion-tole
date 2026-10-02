@@ -2652,22 +2652,28 @@ function defaultEmbOutil(){
     pieceLongueur: 0, pieceLargeur: 0, pieceHauteur: 0,
     pieceFileName: '',
     hasSerreFlan: true,
-    matMatrice: 0, matPoincon: 0, matSerreFlan: 0,
+    symetrique: false,
+    symetrieAxe: 'X',
+    prixKgMatiere: 4,
     moRows: [
       { key:'programmation', label:'Programmation', enabled:true, hg:1, chg:60, hd:1, chd:60 },
-      { key:'cao', label:'CAO', enabled:true, hg:14, chg:75, hd:7, chd:75 },
+      { key:'cao', label:'CAO', enabled:true, hg:8, chg:75, hd:8, chd:75 },
       { key:'map', label:'MAP', enabled:true, hg:6, chg:75, hd:6, chd:75 },
-      { key:'usinage', label:'Usinage', enabled:true, hg:null, chg:85, hd:null, chd:85 }, // hg/hd null = suivent automatiquement l'abaque usinage (bloc matrice) jusqu'à saisie manuelle
-      { key:'laser5axprog', label:'Programme laser 5 axes', enabled:true, hg:3, chg:85, hd:3, chd:85 },
+      { key:'usinage', label:'Usinage', enabled:true, hg:null, chg:120, hd:null, chd:120 }, // hg/hd null = suivent automatiquement l'abaque usinage (bloc matrice) jusqu'à saisie manuelle
+      { key:'laser5axprog', label:'Programme laser 5 axes', enabled:true, hg:2, chg:85, hd:2, chd:85 },
       { key:'laser5axmaquette', label:'Maquette laser 5 axes', enabled:true, hg:2, chg:85, hd:2, chd:85 },
     ],
     dateCreation: null, dateModification: null
   };
 }
 
+/* Densité de l'acier (kg/m³), utilisée pour chiffrer le poids — donc le coût matière —
+   de la matrice, du poinçon et du serre-flan à partir de leur seul volume. */
+const DENSITE_ACIER_KG_M3 = 7850;
+
 /* Cherche dans l'abaque d'usinage le bloc dont le volume est le plus proche de celui demandé
-   (longueur/largeur/hauteur en mm) — permet de lier automatiquement matrice/poinçon/serre-flan
-   à une estimation de coût matière + usinage. */
+   (longueur/largeur/hauteur en mm) — sert uniquement à estimer le temps d'usinage (ligne
+   "Usinage" de la main d'oeuvre), le coût matière étant calculé par poids × prix/kg. */
 function findAbaqueMatch(l, w, h){
   if(!l || !w || !h) return null;
   const vol = l*w*h*1e-9;
@@ -2712,8 +2718,16 @@ function parseStepBoundingBox3D(text){
 }
 
 function computeOutil(o){
-  const matriceL = o.pieceLongueur+160, matriceW = o.pieceLargeur+160, matriceH = o.pieceHauteur+50;
-  const poinconL = o.pieceLongueur, poinconW = o.pieceLargeur, poinconH = Math.max(o.pieceHauteur+50, 100);
+  // Outillage symétrique : si l'outil produit la pièce et son symétrique en une seule frappe,
+  // on double la dimension pièce sur l'axe choisi (X ou Y) et on ajoute 50 mm (espace entre les deux moitiés)
+  // avant de dimensionner matrice / poinçon / serre-flan.
+  const isSym = o.symetrique === true;
+  const symAxe = o.symetrieAxe === 'Y' ? 'Y' : 'X';
+  const effLongueur = (isSym && symAxe==='X') ? (o.pieceLongueur*2 + 50) : o.pieceLongueur;
+  const effLargeur = (isSym && symAxe==='Y') ? (o.pieceLargeur*2 + 50) : o.pieceLargeur;
+
+  const matriceL = effLongueur+160, matriceW = effLargeur+160, matriceH = o.pieceHauteur+50;
+  const poinconL = effLongueur, poinconW = effLargeur, poinconH = Math.max(o.pieceHauteur+50, 100);
   const hasSerreFlan = o.hasSerreFlan !== false;
   const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? (o.pieceHauteur+30) : 0;
 
@@ -2721,7 +2735,19 @@ function computeOutil(o){
   const poinconMatch = findAbaqueMatch(poinconL, poinconW, poinconH);
   const serreFlanMatch = hasSerreFlan ? findAbaqueMatch(serreFlanL, serreFlanW, serreFlanH) : null;
 
-  const matiereTotal = (o.matMatrice||0) + (o.matPoincon||0) + (hasSerreFlan ? (o.matSerreFlan||0) : 0);
+  // Coût matière = volume (m³) × densité acier (kg/m³) = poids (kg) × prix/kg (42CMD8, par défaut 4€).
+  const prixKg = o.prixKgMatiere != null ? o.prixKgMatiere : 4;
+  const matriceVolume = matriceL*matriceW*matriceH*1e-9;
+  const matricePoids = matriceVolume*DENSITE_ACIER_KG_M3;
+  const matriceCoutMatiere = matricePoids*prixKg;
+  const poinconVolume = poinconL*poinconW*poinconH*1e-9;
+  const poinconPoids = poinconVolume*DENSITE_ACIER_KG_M3;
+  const poinconCoutMatiere = poinconPoids*prixKg;
+  const serreFlanVolume = hasSerreFlan ? serreFlanL*serreFlanW*serreFlanH*1e-9 : 0;
+  const serreFlanPoids = serreFlanVolume*DENSITE_ACIER_KG_M3;
+  const serreFlanCoutMatiere = hasSerreFlan ? serreFlanPoids*prixKg : 0;
+
+  const matiereTotal = matriceCoutMatiere + poinconCoutMatiere + serreFlanCoutMatiere;
 
   // Le temps d'usinage par défaut s'appuie sur l'abaque (nb heures usinage du bloc matrice le plus proche)
   // tant que l'utilisateur n'a pas saisi sa propre valeur sur la ligne "Usinage".
@@ -2738,7 +2764,12 @@ function computeOutil(o){
   const totalMainG = sumG + matiereTotal;
   const totalMainD = sumD + matiereTotal;
   return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, hasSerreFlan,
-    matriceMatch, poinconMatch, serreFlanMatch, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
+    isSym, symAxe, effLongueur, effLargeur,
+    matriceMatch, poinconMatch, serreFlanMatch,
+    matriceVolume, matricePoids, matriceCoutMatiere,
+    poinconVolume, poinconPoids, poinconCoutMatiere,
+    serreFlanVolume, serreFlanPoids, serreFlanCoutMatiere,
+    prixKg, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
 }
 
 /* Abaque usinage outil — référence (feuille "abaque usinage outil" du classeur) */
@@ -2872,17 +2903,15 @@ function renderEmbOutilForm(){
   const o = embOutilEditing;
   const c = computeOutil(o);
 
-  const matchCard = (title, ref42, L, W, H, match, fieldKey) => `
+  const poidsCard = (title, L, W, H, volume, poids, coutMatiere, match) => `
     <div class="result-card">
-      <div style="font-weight:600;">${title} — ${L}×${W}×${H} mm${ref42?` <span style="color:var(--ink-dim);font-weight:400;">(${ref42})</span>`:''}</div>
-      ${match ? `
-        <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">
-          Bloc abaque le plus proche : ${match.ref.l}×${match.ref.w}×${match.ref.h} mm${match.ref.note?` — ${escapeHtml(match.ref.note)}`:''}<br>
-          usinage ${match.prixUsinage} € (${match.nbHeureUsinage.toFixed(1)} h)${match.prixMatiere!=null?` + matière ${match.prixMatiere} €`:''}
-        </div>
-        <button class="btn small" style="margin-top:8px;" data-use-match="${fieldKey}" data-match-value="${(match.prixUsinage + (match.prixMatiere||0)).toFixed(2)}">Utiliser cette estimation</button>
-      ` : `<div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Aucune correspondance dans l'abaque.</div>`}
-      <div class="field" style="margin-top:10px;"><label>Coût retenu (€)</label><input type="number" step="0.01" data-ofield="${fieldKey}" value="${o[fieldKey]}" min="0"></div>
+      <div style="font-weight:600;">${title} — ${L}×${W}×${H} mm</div>
+      <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">
+        Volume : ${volume.toFixed(5)} m³ · Poids : ${poids.toFixed(2)} kg
+        ${match ? `<br>Temps d'usinage abaque (bloc ${match.ref.l}×${match.ref.w}×${match.ref.h} mm) : ${match.nbHeureUsinage.toFixed(1)} h` : ''}
+      </div>
+      <div style="font-family:var(--display);font-size:20px;margin-top:8px;">${coutMatiere.toFixed(2)} €</div>
+      <div style="font-size:12px;color:var(--ink-dim);">coût matière (poids × prix/kg)</div>
     </div>`;
 
   view.innerHTML = `
@@ -2890,7 +2919,7 @@ function renderEmbOutilForm(){
       <div>
         <div class="eyebrow">Emboutissage · Outillage</div>
         <h1>${o._fbId ? "Modifier l'outil" : "Nouvel outil"}</h1>
-        <div class="lede">Entre les dimensions de la pièce (ou charge son fichier STEP) ; les dimensions de la matrice, du poinçon et du serre-flan se déduisent automatiquement, avec une estimation de coût tirée de l'abaque d'usinage.</div>
+        <div class="lede">Entre les dimensions de la pièce (ou charge son fichier STEP) ; les dimensions de la matrice, du poinçon et du serre-flan se déduisent automatiquement, et leur coût matière se calcule à partir de leur poids (volume × densité acier) au prix du kilo.</div>
       </div>
     </header>
 
@@ -2915,6 +2944,20 @@ function renderEmbOutilForm(){
         <label style="text-transform:none;letter-spacing:0;font-weight:500;"><input type="checkbox" id="eo-has-serreflan" ${o.hasSerreFlan!==false?'checked':''} style="width:auto;margin-right:8px;vertical-align:middle;">Un serre-flan est-il nécessaire pour cet outil ?</label>
       </div>
 
+      <div class="field" style="margin-top:10px;">
+        <label style="text-transform:none;letter-spacing:0;font-weight:500;"><input type="checkbox" id="eo-symetrique" ${o.symetrique?'checked':''} style="width:auto;margin-right:8px;vertical-align:middle;">Outillage symétrique (produit la pièce + son symétrique en une frappe) ?</label>
+      </div>
+      ${o.symetrique ? `
+        <div class="field" style="max-width:280px;">
+          <label>Axe de symétrie</label>
+          <select id="eo-symetrie-axe">
+            <option value="X" ${o.symetrieAxe!=='Y'?'selected':''}>X (longueur)</option>
+            <option value="Y" ${o.symetrieAxe==='Y'?'selected':''}>Y (largeur)</option>
+          </select>
+        </div>
+        <div style="font-size:12px;color:var(--ink-dim);margin:-4px 0 10px;">La dimension pièce sur l'axe ${c.symAxe} est doublée puis +50 mm avant de dimensionner l'outil : ${c.symAxe==='X'?`${o.pieceLongueur} → ${c.effLongueur} mm`:`${o.pieceLargeur} → ${c.effLargeur} mm`}.</div>
+      ` : ''}
+
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (déduites)</h3>
       <div class="table-wrap">
         <table>
@@ -2927,13 +2970,17 @@ function renderEmbOutilForm(){
         </table>
       </div>
 
-      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière + usinage — lien avec l'abaque</h3>
-      <div class="grid3">
-        ${matchCard('Matrice', '42CMD8', c.matriceL, c.matriceW, c.matriceH, c.matriceMatch, 'matMatrice')}
-        ${matchCard('Poinçon', '42CMD8', c.poinconL, c.poinconW, c.poinconH, c.poinconMatch, 'matPoincon')}
-        ${c.hasSerreFlan ? matchCard('Serre-flan', 'E36', c.serreFlanL, c.serreFlanW, c.serreFlanH, c.serreFlanMatch, 'matSerreFlan') : ''}
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière — poids × prix au kilo</h3>
+      <div class="field" style="max-width:280px;">
+        <label>Prix du kilo (42CMD8)</label>
+        <input type="number" step="0.01" id="eo-prix-kg" value="${c.prixKg}" min="0">
       </div>
-      <div class="result-card" style="max-width:260px;margin-top:4px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière + usinage (1 main)</div></div>
+      <div class="grid3">
+        ${poidsCard('Matrice', c.matriceL, c.matriceW, c.matriceH, c.matriceVolume, c.matricePoids, c.matriceCoutMatiere, c.matriceMatch)}
+        ${poidsCard('Poinçon', c.poinconL, c.poinconW, c.poinconH, c.poinconVolume, c.poinconPoids, c.poinconCoutMatiere, c.poinconMatch)}
+        ${c.hasSerreFlan ? poidsCard('Serre-flan', c.serreFlanL, c.serreFlanW, c.serreFlanH, c.serreFlanVolume, c.serreFlanPoids, c.serreFlanCoutMatiere, c.serreFlanMatch) : ''}
+      </div>
+      <div class="result-card" style="max-width:260px;margin-top:4px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière (poids × ${c.prixKg} €/kg)</div></div>
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Main d'oeuvre de fabrication</h3>
       <div style="font-size:12px;color:var(--ink-dim);margin-bottom:8px;">Décoche une opération si elle ne s'applique pas à cet outil. Le temps d'« Usinage » reprend par défaut le nombre d'heures de l'abaque pour le bloc matrice le plus proche — modifiable.</div>
@@ -2961,8 +3008,8 @@ function renderEmbOutilForm(){
       </div>
 
       <div class="grid2" style="margin-top:16px;">
-        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainG.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN G (matière + usinage)</div></div>
-        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainD.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN D (matière + usinage)</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainG.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN G (matière + main d'oeuvre)</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainD.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN D (matière + main d'oeuvre)</div></div>
       </div>
 
       <div class="modal-actions" style="justify-content:flex-start;">
@@ -2980,13 +3027,10 @@ function renderEmbOutilForm(){
   });
   document.getElementById('eo-nom').onchange = (e)=>{ o.nom = e.target.value; };
   document.getElementById('eo-has-serreflan').onchange = (e)=>{ o.hasSerreFlan = e.target.checked; renderEmbOutilForm(); };
-
-  document.querySelectorAll('[data-use-match]').forEach(btn=>{
-    btn.onclick = ()=>{
-      o[btn.dataset.useMatch] = parseFloat(btn.dataset.matchValue) || 0;
-      renderEmbOutilForm();
-    };
-  });
+  document.getElementById('eo-prix-kg').onchange = (e)=>{ o.prixKgMatiere = parseFloat(e.target.value) || 0; renderEmbOutilForm(); };
+  document.getElementById('eo-symetrique').onchange = (e)=>{ o.symetrique = e.target.checked; renderEmbOutilForm(); };
+  const symAxeSel = document.getElementById('eo-symetrie-axe');
+  if(symAxeSel) symAxeSel.onchange = (e)=>{ o.symetrieAxe = e.target.value; renderEmbOutilForm(); };
 
   document.querySelectorAll('[data-mo-field]').forEach(inp=>{
     inp.onchange = (e)=>{
@@ -3018,6 +3062,7 @@ function renderEmbOutilForm(){
       const bbox = parseStepBoundingBox3D(text);
       o.pieceLongueur = bbox.longueur; o.pieceLargeur = bbox.largeur; o.pieceHauteur = bbox.hauteur;
       o.pieceFileName = file.name;
+      o.nom = file.name.replace(/\.(stp|step)$/i, '');
       toast(`Pièce lue : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm (volume ≈ ${bbox.volume.toFixed(5)} m³)`);
       renderEmbOutilForm();
     }catch(err){
