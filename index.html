@@ -2626,30 +2626,82 @@ function defaultEmbOutil(){
   return {
     nom: '',
     pieceLongueur: 800, pieceLargeur: 250, pieceHauteur: 120,
+    hasSerreFlan: true,
     matMatrice: 0, matPoincon: 0, matSerreFlan: 0,
     moRows: [
-      { label:'programmation', hg:1, chg:60, hd:1, chd:60 },
-      { label:'CAO', hg:14, chg:75, hd:7, chd:75 },
-      { label:'MAP', hg:6, chg:75, hd:6, chd:75 },
-      { label:'ELECTRO EROSION FOND MOBILE', hg:10, chg:120, hd:10, chd:120 },
-      { label:'USINAGES', hg:55, chg:85, hd:55, chd:85 },
-      { label:'prog las5a + montage', hg:5, chg:85, hd:5, chd:85 },
+      { key:'programmation', label:'Programmation', enabled:true, hg:1, chg:60, hd:1, chd:60 },
+      { key:'cao', label:'CAO', enabled:true, hg:14, chg:75, hd:7, chd:75 },
+      { key:'map', label:'MAP', enabled:true, hg:6, chg:75, hd:6, chd:75 },
+      { key:'usinage', label:'Usinage', enabled:true, hg:null, chg:85, hd:null, chd:85 }, // hg/hd null = suivent automatiquement l'abaque usinage (bloc matrice) jusqu'à saisie manuelle
+      { key:'laser5axprog', label:'Programme laser 5 axes', enabled:true, hg:3, chg:85, hd:3, chd:85 },
+      { key:'laser5axmaquette', label:'Maquette laser 5 axes', enabled:true, hg:2, chg:85, hd:2, chd:85 },
     ],
     dateCreation: null, dateModification: null
   };
 }
 
+/* Cherche dans l'abaque d'usinage le bloc dont le volume est le plus proche de celui demandé
+   (longueur/largeur/hauteur en mm) — permet de lier automatiquement matrice/poinçon/serre-flan
+   à une estimation de coût matière + usinage. */
+function findAbaqueMatch(l, w, h){
+  if(!l || !w || !h) return null;
+  const vol = l*w*h*1e-9;
+  let best = null, bestDiff = Infinity;
+  ABAQUE_USINAGE.forEach(a=>{
+    const v = a.l*a.w*a.h*1e-9;
+    const diff = Math.abs(v-vol);
+    if(diff < bestDiff){ bestDiff = diff; best = a; }
+  });
+  if(!best) return null;
+  return { ref: best, volumeDemande: vol, prixUsinage: best.prixUsinage, prixMatiere: best.prixMatiere, nbHeureUsinage: best.prixUsinage/85 };
+}
+
+/* Lecture approximative d'un fichier STEP : boîte englobante 3D à partir des points CARTESIAN_POINT.
+   Comme pour l'imbrication, c'est une approximation (pas de vraie géométrie CAO) — à vérifier. */
+function parseStepBoundingBox3D(text){
+  const re = /CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]+)\)/g;
+  let m, minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
+  while((m = re.exec(text))){
+    const parts = m[1].split(',').map(s=>parseFloat(s.trim()));
+    if(parts.length>=3 && parts.slice(0,3).every(isFinite)){
+      if(parts[0]<minX)minX=parts[0]; if(parts[0]>maxX)maxX=parts[0];
+      if(parts[1]<minY)minY=parts[1]; if(parts[1]>maxY)maxY=parts[1];
+      if(parts[2]<minZ)minZ=parts[2]; if(parts[2]>maxZ)maxZ=parts[2];
+    }
+  }
+  if(!isFinite(minX)) throw new Error('Aucun point exploitable trouvé dans le fichier STEP.');
+  const longueur = Math.round(maxX-minX), largeur = Math.round(maxY-minY), hauteur = Math.round(maxZ-minZ);
+  return { longueur, largeur, hauteur, volume: (longueur*largeur*hauteur)/1e9 };
+}
+
 function computeOutil(o){
   const matriceL = o.pieceLongueur+160, matriceW = o.pieceLargeur+160, matriceH = o.pieceHauteur+50;
-  const poinconL = o.pieceLongueur, poinconW = o.pieceLargeur, poinconH = o.pieceHauteur+50;
-  const serreFlanL = matriceL, serreFlanW = matriceW, serreFlanH = 30;
-  const matiereTotal = (o.matMatrice||0) + (o.matPoincon||0) + (o.matSerreFlan||0);
-  const rows = (o.moRows||[]).map(r=>Object.assign({}, r, { totG: (r.hg||0)*(r.chg||0), totD: (r.hd||0)*(r.chd||0) }));
+  const poinconL = o.pieceLongueur, poinconW = o.pieceLargeur, poinconH = Math.max(o.pieceHauteur+50, 100);
+  const hasSerreFlan = o.hasSerreFlan !== false;
+  const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? (o.pieceHauteur+30) : 0;
+
+  const matriceMatch = findAbaqueMatch(matriceL, matriceW, matriceH);
+  const poinconMatch = findAbaqueMatch(poinconL, poinconW, poinconH);
+  const serreFlanMatch = hasSerreFlan ? findAbaqueMatch(serreFlanL, serreFlanW, serreFlanH) : null;
+
+  const matiereTotal = (o.matMatrice||0) + (o.matPoincon||0) + (hasSerreFlan ? (o.matSerreFlan||0) : 0);
+
+  // Le temps d'usinage par défaut s'appuie sur l'abaque (nb heures usinage du bloc matrice le plus proche)
+  // tant que l'utilisateur n'a pas saisi sa propre valeur sur la ligne "Usinage".
+  const rows = (o.moRows||[]).map(r=>{
+    const on = r.enabled !== false;
+    let hg = r.hg, hd = r.hd;
+    if(r.key==='usinage' && (hg==null || hg==='') && matriceMatch) hg = matriceMatch.nbHeureUsinage;
+    if(r.key==='usinage' && (hd==null || hd==='') && matriceMatch) hd = matriceMatch.nbHeureUsinage;
+    hg = hg||0; hd = hd||0;
+    return Object.assign({}, r, { hg, hd, totG: on ? hg*(r.chg||0) : 0, totD: on ? hd*(r.chd||0) : 0 });
+  });
   const sumG = rows.reduce((s,r)=>s+r.totG,0);
   const sumD = rows.reduce((s,r)=>s+r.totD,0);
   const totalMainG = sumG + matiereTotal;
   const totalMainD = sumD + matiereTotal;
-  return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
+  return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, hasSerreFlan,
+    matriceMatch, poinconMatch, serreFlanMatch, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
 }
 
 /* Abaque usinage outil — référence (feuille "abaque usinage outil" du classeur) */
@@ -2783,59 +2835,84 @@ function renderEmbOutilForm(){
   const o = embOutilEditing;
   const c = computeOutil(o);
 
+  const matchCard = (title, ref42, L, W, H, match, fieldKey) => `
+    <div class="result-card">
+      <div style="font-weight:600;">${title} — ${L}×${W}×${H} mm${ref42?` <span style="color:var(--ink-dim);font-weight:400;">(${ref42})</span>`:''}</div>
+      ${match ? `
+        <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">
+          Bloc abaque le plus proche : ${match.ref.l}×${match.ref.w}×${match.ref.h} mm${match.ref.note?` — ${escapeHtml(match.ref.note)}`:''}<br>
+          usinage ${match.prixUsinage} € (${match.nbHeureUsinage.toFixed(1)} h)${match.prixMatiere!=null?` + matière ${match.prixMatiere} €`:''}
+        </div>
+        <button class="btn small" style="margin-top:8px;" data-use-match="${fieldKey}" data-match-value="${(match.prixUsinage + (match.prixMatiere||0)).toFixed(2)}">Utiliser cette estimation</button>
+      ` : `<div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Aucune correspondance dans l'abaque.</div>`}
+      <div class="field" style="margin-top:10px;"><label>Coût retenu (€)</label><input type="number" step="0.01" data-ofield="${fieldKey}" value="${o[fieldKey]}" min="0"></div>
+    </div>`;
+
   view.innerHTML = `
     <header class="page">
       <div>
         <div class="eyebrow">Emboutissage · Outillage</div>
         <h1>${o._fbId ? "Modifier l'outil" : "Nouvel outil"}</h1>
-        <div class="lede">Entre les dimensions de la pièce en mm (prévoir 5 à 10/10 mm de plus par pièce) ; les dimensions de la matrice, du poinçon et du serre-flan se déduisent automatiquement.</div>
+        <div class="lede">Entre les dimensions de la pièce (ou charge son fichier STEP) ; les dimensions de la matrice, du poinçon et du serre-flan se déduisent automatiquement, avec une estimation de coût tirée de l'abaque d'usinage.</div>
       </div>
     </header>
 
-    <div class="modal" style="max-width:720px;margin:0 0 24px;box-shadow:none;">
+    <div class="modal" style="max-width:760px;margin:0 0 24px;box-shadow:none;">
       <div class="field"><label>Désignation de l'outil</label><input type="text" id="eo-nom" value="${escapeHtml(o.nom)}" placeholder="Ex. FERM INF PIED AVT"></div>
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de la pièce (mm)</h3>
+      <div class="field">
+        <label>Charger la pièce depuis un fichier STEP (prévoir 5 à 10/10 mm de plus par pièce)</label>
+        <input type="file" id="eo-step-file" accept=".step,.stp">
+        <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Lecture approximative (boîte englobante à partir des points 3D) — vérifie les 3 dimensions obtenues et corrige-les si besoin.</span>
+      </div>
       <div class="grid3">
-        <div class="field"><label>Longueur</label><input type="number" data-ofield="pieceLongueur" value="${o.pieceLongueur}" min="0"></div>
-        <div class="field"><label>Largeur</label><input type="number" data-ofield="pieceLargeur" value="${o.pieceLargeur}" min="0"></div>
-        <div class="field"><label>Hauteur</label><input type="number" data-ofield="pieceHauteur" value="${o.pieceHauteur}" min="0"></div>
+        <div class="field"><label>Longueur X</label><input type="number" data-ofield="pieceLongueur" value="${o.pieceLongueur}" min="0"></div>
+        <div class="field"><label>Largeur Y</label><input type="number" data-ofield="pieceLargeur" value="${o.pieceLargeur}" min="0"></div>
+        <div class="field"><label>Hauteur Z</label><input type="number" data-ofield="pieceHauteur" value="${o.pieceHauteur}" min="0"></div>
+      </div>
+      <div style="font-size:12px;color:var(--ink-dim);margin:-4px 0 4px;">Volume pièce (boîte englobante) : ${((o.pieceLongueur*o.pieceLargeur*o.pieceHauteur)/1e9).toFixed(5)} m³</div>
+
+      <div class="field" style="margin-top:14px;">
+        <label style="text-transform:none;letter-spacing:0;font-weight:500;"><input type="checkbox" id="eo-has-serreflan" ${o.hasSerreFlan!==false?'checked':''} style="width:auto;margin-right:8px;vertical-align:middle;">Un serre-flan est-il nécessaire pour cet outil ?</label>
       </div>
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (déduites)</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th></th><th>Matrice (42CMD8)</th><th>Poinçon (42CMD8)</th><th>Serre-flan (E36)</th></tr></thead>
+          <thead><tr><th></th><th>Matrice</th><th>Poinçon</th>${c.hasSerreFlan?'<th>Serre-flan</th>':''}</tr></thead>
           <tbody>
-            <tr><td>Longueur</td><td>${c.matriceL} mm</td><td>${c.poinconL} mm</td><td>${c.serreFlanL} mm</td></tr>
-            <tr><td>Largeur</td><td>${c.matriceW} mm</td><td>${c.poinconW} mm</td><td>${c.serreFlanW} mm</td></tr>
-            <tr><td>Hauteur</td><td>${c.matriceH} mm</td><td>${c.poinconH} mm</td><td>${c.serreFlanH} mm</td></tr>
+            <tr><td>Longueur (pièce +160)</td><td>${c.matriceL} mm</td><td>${c.poinconL} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanL} mm</td>`:''}</tr>
+            <tr><td>Largeur (pièce +160)</td><td>${c.matriceW} mm</td><td>${c.poinconW} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanW} mm</td>`:''}</tr>
+            <tr><td>Hauteur</td><td>${c.matriceH} mm (pièce +50)</td><td>${c.poinconH} mm (pièce +50, mini 100)</td>${c.hasSerreFlan?`<td>${c.serreFlanH} mm (pièce +30)</td>`:''}</tr>
           </tbody>
         </table>
       </div>
 
-      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière (1 main) — à reporter de l'abaque usinage ci-dessous</h3>
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière + usinage — lien avec l'abaque</h3>
       <div class="grid3">
-        <div class="field"><label>Matrice (€)</label><input type="number" step="0.01" data-ofield="matMatrice" value="${o.matMatrice}" min="0"></div>
-        <div class="field"><label>Poinçon (€)</label><input type="number" step="0.01" data-ofield="matPoincon" value="${o.matPoincon}" min="0"></div>
-        <div class="field"><label>Serre-flan (€)</label><input type="number" step="0.01" data-ofield="matSerreFlan" value="${o.matSerreFlan}" min="0"></div>
+        ${matchCard('Matrice', '42CMD8', c.matriceL, c.matriceW, c.matriceH, c.matriceMatch, 'matMatrice')}
+        ${matchCard('Poinçon', '42CMD8', c.poinconL, c.poinconW, c.poinconH, c.poinconMatch, 'matPoincon')}
+        ${c.hasSerreFlan ? matchCard('Serre-flan', 'E36', c.serreFlanL, c.serreFlanW, c.serreFlanH, c.serreFlanMatch, 'matSerreFlan') : ''}
       </div>
-      <div class="result-card" style="max-width:260px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière (1 main)</div></div>
+      <div class="result-card" style="max-width:260px;margin-top:4px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière + usinage (1 main)</div></div>
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Main d'oeuvre de fabrication</h3>
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:8px;">Décoche une opération si elle ne s'applique pas à cet outil. Le temps d'« Usinage » reprend par défaut le nombre d'heures de l'abaque pour le bloc matrice le plus proche — modifiable.</div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Opération</th><th>MAIN G — heures</th><th>MAIN G — €/h</th><th>MAIN G — total</th><th>MAIN D — heures</th><th>MAIN D — €/h</th><th>MAIN D — total</th><th></th></tr></thead>
+          <thead><tr><th>Inclus</th><th>Opération</th><th>MAIN G — heures</th><th>MAIN G — €/h</th><th>MAIN G — total</th><th>MAIN D — heures</th><th>MAIN D — €/h</th><th>MAIN D — total</th><th></th></tr></thead>
           <tbody>
-            ${o.moRows.map((r,i)=>`
-              <tr>
+            ${c.rows.map((r,i)=>`
+              <tr ${r.enabled===false?'style="opacity:.5;"':''}>
+                <td><input type="checkbox" data-mo-field="enabled" data-mo-idx="${i}" ${r.enabled!==false?'checked':''} style="width:auto;"></td>
                 <td><input type="text" data-mo-field="label" data-mo-idx="${i}" value="${escapeHtml(r.label)}" style="width:170px;"></td>
                 <td><input type="number" step="0.5" data-mo-field="hg" data-mo-idx="${i}" value="${r.hg}" style="width:70px;"></td>
                 <td><input type="number" data-mo-field="chg" data-mo-idx="${i}" value="${r.chg}" style="width:70px;"></td>
-                <td>${(r.hg*r.chg).toFixed(2)} €</td>
+                <td>${r.totG.toFixed(2)} €</td>
                 <td><input type="number" step="0.5" data-mo-field="hd" data-mo-idx="${i}" value="${r.hd}" style="width:70px;"></td>
                 <td><input type="number" data-mo-field="chd" data-mo-idx="${i}" value="${r.chd}" style="width:70px;"></td>
-                <td>${(r.hd*r.chd).toFixed(2)} €</td>
+                <td>${r.totD.toFixed(2)} €</td>
                 <td><button class="btn ghost" data-mo-del="${i}" title="Supprimer la ligne">✕</button></td>
               </tr>`).join('')}
           </tbody>
@@ -2864,12 +2941,22 @@ function renderEmbOutilForm(){
     };
   });
   document.getElementById('eo-nom').onchange = (e)=>{ o.nom = e.target.value; };
+  document.getElementById('eo-has-serreflan').onchange = (e)=>{ o.hasSerreFlan = e.target.checked; renderEmbOutilForm(); };
+
+  document.querySelectorAll('[data-use-match]').forEach(btn=>{
+    btn.onclick = ()=>{
+      o[btn.dataset.useMatch] = parseFloat(btn.dataset.matchValue) || 0;
+      renderEmbOutilForm();
+    };
+  });
 
   document.querySelectorAll('[data-mo-field]').forEach(inp=>{
     inp.onchange = (e)=>{
       const idx = parseInt(e.target.dataset.moIdx);
       const f = e.target.dataset.moField;
-      o.moRows[idx][f] = (f==='label') ? e.target.value : (parseFloat(e.target.value)||0);
+      if(f==='label') o.moRows[idx][f] = e.target.value;
+      else if(f==='enabled') o.moRows[idx][f] = e.target.checked;
+      else o.moRows[idx][f] = parseFloat(e.target.value)||0;
       renderEmbOutilForm();
     };
   });
@@ -2881,8 +2968,23 @@ function renderEmbOutilForm(){
     };
   });
   document.getElementById('eo-add-row').onclick = ()=>{
-    o.moRows.push({ label:'', hg:0, chg:0, hd:0, chd:0 });
+    o.moRows.push({ key:'', label:'', enabled:true, hg:0, chg:0, hd:0, chd:0 });
     renderEmbOutilForm();
+  };
+
+  document.getElementById('eo-step-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      const text = await file.text();
+      const bbox = parseStepBoundingBox3D(text);
+      o.pieceLongueur = bbox.longueur; o.pieceLargeur = bbox.largeur; o.pieceHauteur = bbox.hauteur;
+      toast(`Pièce lue : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm (volume ≈ ${bbox.volume.toFixed(5)} m³)`);
+      renderEmbOutilForm();
+    }catch(err){
+      console.error(err);
+      toast('Impossible de lire ce fichier : ' + err.message);
+    }
   };
 
   document.getElementById('eo-save').onclick = async ()=>{
