@@ -72,6 +72,9 @@
     text-align:left;background:none;border:none;color:var(--ink-dim);padding:11px 10px;border-radius:var(--radius);
     cursor:pointer;display:flex;align-items:center;gap:10px;border-left:3px solid transparent;
   }
+  .nav-group{margin-top:22px;}
+  .nav-group:first-child{margin-top:0;}
+  .nav-group-title{font-family:var(--mono);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--ink-dim);opacity:.6;padding:0 10px 4px;}
   .nav-btn .num{font-family:var(--mono);font-size:11px;color:var(--ink-dim);}
   .nav-btn:hover{color:var(--ink);background:var(--panel-2);}
   .nav-btn.active{color:var(--ink);background:var(--panel-2);border-left-color:var(--accent);}
@@ -321,12 +324,26 @@
   <div class="brand">TÔLE<span>RIE</span></div>
   <div class="brand-sub">Gestion de stock</div>
   <nav>
-    <button class="nav-btn" data-tab="parametres"><span class="num">01</span> Paramètres</button>
-    <button class="nav-btn active" data-tab="inventaire"><span class="num">02</span> Inventaire</button>
-    <button class="nav-btn" data-tab="zones"><span class="num">03</span> Zones</button>
-    <button class="nav-btn" data-tab="scanner"><span class="num">04</span> Scanner QR</button>
-    <button class="nav-btn" data-tab="imbrication"><span class="num">05</span> Imbrication</button>
-    <button class="nav-btn" data-tab="decoupelaser"><span class="num">06</span> Découpe laser</button>
+    <div class="nav-group">
+      <div class="nav-group-title">Rangement tôlerie</div>
+      <button class="nav-btn active" data-tab="inventaire"><span class="num">01</span> Inventaire</button>
+      <button class="nav-btn" data-tab="zones"><span class="num">02</span> Zones</button>
+      <button class="nav-btn" data-tab="scanner"><span class="num">03</span> Scanner QR</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-title">Laser — simulation &amp; imbrication</div>
+      <button class="nav-btn" data-tab="decoupelaser"><span class="num">04</span> Découpe laser</button>
+      <button class="nav-btn" data-tab="imbrication"><span class="num">05</span> Imbrication</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-title">Emboutissage</div>
+      <button class="nav-btn" data-tab="embpiece"><span class="num">06</span> Pièce</button>
+      <button class="nav-btn" data-tab="taboutil"><span class="num">07</span> Outillage</button>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-title">Réglages</div>
+      <button class="nav-btn" data-tab="parametres"><span class="num">08</span> Paramètres</button>
+    </div>
   </nav>
   <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span>Connexion…</div>
 </div>
@@ -344,6 +361,8 @@
 --------------------------------------------------------- */
 let toles = [];
 let zones = [];
+let embPieces = [];
+let embOutils = [];
 let settings = { paletteStart: 1, defaultLongueur: 1000, defaultLargeur: 1000, defaultEpaisseur: 1, defaultMatiere: 'Acier', defaultSeuil: 1 };
 let currentTab = 'inventaire';
 
@@ -399,18 +418,21 @@ function generateRef(matiere, nuance, epaisseur, longueur, largeur, excludeId){
   return `${base}-${String(next).padStart(3,'0')}`;
 }
 
-let unsubToles = null, unsubZones = null, unsubSettings = null;
+let unsubToles = null, unsubZones = null, unsubSettings = null, unsubEmbPieces = null, unsubEmbOutils = null;
 
 function detachListeners(){
   if(unsubToles){ unsubToles(); unsubToles = null; }
   if(unsubZones){ unsubZones(); unsubZones = null; }
   if(unsubSettings){ unsubSettings(); unsubSettings = null; }
+  if(unsubEmbPieces){ unsubEmbPieces(); unsubEmbPieces = null; }
+  if(unsubEmbOutils){ unsubEmbOutils(); unsubEmbOutils = null; }
 }
 
 async function loadData(){
   await new Promise((resolve)=>{
     let done = 0;
-    const checkDone = ()=>{ done++; if(done>=3) resolve(); };
+    const TOTAL = 5;
+    const checkDone = ()=>{ done++; if(done>=TOTAL) resolve(); };
 
     unsubToles = db.collection('toles').onSnapshot(snap=>{
       toles = snap.docs.map(d=>{
@@ -426,14 +448,14 @@ async function loadData(){
         };
       });
       serverIdSnapshots.toles = new Set(toles.map(t=>t._fbId));
-      if(done>=3) renderLiveSafe();
+      if(done>=TOTAL) renderLiveSafe();
       checkDone();
     }, e=>{ console.error(e); toles = []; toast('Impossible de charger le stock depuis Firebase'); checkDone(); });
 
     unsubZones = db.collection('zones').onSnapshot(snap=>{
       zones = snap.docs.map(d=>({ code: d.id, nom: d.data().nom || d.id }));
       serverIdSnapshots.zones = new Set(zones.map(z=>z.code));
-      if(done>=3) renderLiveSafe();
+      if(done>=TOTAL) renderLiveSafe();
       checkDone();
     }, e=>{ console.error(e); zones = []; toast('Impossible de charger les zones depuis Firebase'); checkDone(); });
 
@@ -449,9 +471,23 @@ async function loadData(){
           defaultSeuil: Number(d.defaultSeuil) || 1,
         };
       }
-      if(done>=3) renderLiveSafe();
+      if(done>=TOTAL) renderLiveSafe();
       checkDone();
     }, e=>{ console.error(e); checkDone(); });
+
+    unsubEmbPieces = db.collection('embPieces').onSnapshot(snap=>{
+      embPieces = snap.docs.map(d=> Object.assign(defaultEmbPiece(), d.data(), { id: uid(), _fbId: d.id }));
+      serverIdSnapshots.embPieces = new Set(embPieces.map(p=>p._fbId));
+      if(done>=TOTAL) renderLiveSafe();
+      checkDone();
+    }, e=>{ console.error(e); embPieces = []; checkDone(); });
+
+    unsubEmbOutils = db.collection('embOutils').onSnapshot(snap=>{
+      embOutils = snap.docs.map(d=> Object.assign(defaultEmbOutil(), d.data(), { id: uid(), _fbId: d.id }));
+      serverIdSnapshots.embOutils = new Set(embOutils.map(o=>o._fbId));
+      if(done>=TOTAL) renderLiveSafe();
+      checkDone();
+    }, e=>{ console.error(e); embOutils = []; checkDone(); });
   });
 }
 
@@ -459,6 +495,38 @@ async function saveSettings(){
   try{
     await db.collection('config').doc('settings').set(settings);
   }catch(e){ console.error(e); toast('Impossible d\'enregistrer les paramètres'); }
+}
+
+async function saveEmbPieces(){
+  try{
+    const currentIds = new Set(embPieces.filter(p=>p._fbId).map(p=>p._fbId));
+    const removed = [...(serverIdSnapshots.embPieces || new Set())].filter(id=>!currentIds.has(id));
+    for(const id of removed){ await db.collection('embPieces').doc(id).delete(); }
+    for(const p of embPieces){
+      const fields = Object.assign({}, p);
+      delete fields.id; delete fields._fbId;
+      fields.dateModification = new Date().toISOString();
+      if(p._fbId){ await db.collection('embPieces').doc(p._fbId).set(fields); }
+      else{ const ref = await db.collection('embPieces').add(fields); p._fbId = ref.id; }
+    }
+    serverIdSnapshots.embPieces = new Set(embPieces.filter(p=>p._fbId).map(p=>p._fbId));
+  }catch(e){ console.error(e); toast('Erreur de synchronisation Firebase — vérifiez la console'); }
+}
+
+async function saveEmbOutils(){
+  try{
+    const currentIds = new Set(embOutils.filter(o=>o._fbId).map(o=>o._fbId));
+    const removed = [...(serverIdSnapshots.embOutils || new Set())].filter(id=>!currentIds.has(id));
+    for(const id of removed){ await db.collection('embOutils').doc(id).delete(); }
+    for(const o of embOutils){
+      const fields = Object.assign({}, o);
+      delete fields.id; delete fields._fbId;
+      fields.dateModification = new Date().toISOString();
+      if(o._fbId){ await db.collection('embOutils').doc(o._fbId).set(fields); }
+      else{ const ref = await db.collection('embOutils').add(fields); o._fbId = ref.id; }
+    }
+    serverIdSnapshots.embOutils = new Set(embOutils.filter(o=>o._fbId).map(o=>o._fbId));
+  }catch(e){ console.error(e); toast('Erreur de synchronisation Firebase — vérifiez la console'); }
 }
 
 async function saveToles(){
@@ -525,6 +593,8 @@ function render(){
   else if(currentTab === 'parametres') renderParametres();
   else if(currentTab === 'imbrication') renderImbrication();
   else if(currentTab === 'decoupelaser') renderDecoupeLaser();
+  else if(currentTab === 'embpiece') renderEmbPiece();
+  else if(currentTab === 'taboutil') renderEmbOutil();
 }
 
 /* Utilisée par les écouteurs temps réel : on évite de redessiner l'onglet Scanner
@@ -2201,6 +2271,631 @@ function showInstallBanner(kind){
 
 if(isIosDevice() && !isStandaloneApp()){
   showInstallBanner('ios');
+}
+
+/* ---------------------------------------------------------
+   EMBOUTISSAGE — PIÈCE
+   (reprend le classeur « calcul prix outillage & matériaux » :
+   feuille "pièce FERM INF PIED AVT" — mêmes données, mêmes formules)
+--------------------------------------------------------- */
+function defaultEmbPiece(){
+  return {
+    nom: '',
+    qteLancement: 5,
+    epaisseur: 1.5,
+    longueurFlanc: 1000,
+    largeurFlanc: 500,
+    nbDecoupes: 0,
+    diametreDecoupes: 5,
+    nbPli: 0,
+    nbSoudures: 0,
+    vitesseLaser: 2000,
+    vitesseDebit: 50,
+    hauteurCoupeDebit: 0,
+    tempsEmboutissageMin: 0,
+    tempsPliageMin: 0,
+    tempsMontageOutilMin: 0,
+    decoupesLaser5axes: 0,
+    tempsControleMin: 0,
+    coutAdmin: 30,
+    coutAccessoire: 0,
+    coutMatiere: 0,
+    coutEmballage: 5,
+    coutSousTraitance: 0,
+    coutDivers: 0,
+    margeAppliquee: 0.25,
+    dateCreation: null, dateModification: null
+  };
+}
+
+function computePiece(p){
+  const poidsPiece = (p.longueurFlanc * p.largeurFlanc) * p.epaisseur * (8/1000000);
+  const longueurCoupe = (p.longueurFlanc + p.largeurFlanc + (p.nbDecoupes/2*3.2*p.diametreDecoupes)) * 2;
+  const tempsDecoupeMin = p.vitesseLaser>0 ? longueurCoupe / p.vitesseLaser : 0;
+  const tempsDebitMin = 0.5 + (p.vitesseDebit>0 ? p.hauteurCoupeDebit / p.vitesseDebit : 0);
+
+  const tLaserH = longueurCoupe===0 ? 0 : (15 + tempsDecoupeMin*p.qteLancement)/60;
+  const tDebitH = p.hauteurCoupeDebit===0 ? 0 : (7 + tempsDebitMin*p.qteLancement)/60;
+  const tEmbH = p.nbPli===0 ? 0 : (15 + p.tempsEmboutissageMin*p.qteLancement)/60;
+  const tPliageH = (p.tempsPliageMin*p.qteLancement)/60;
+  const tMontageH = p.tempsMontageOutilMin===0 ? 0 : (7 + p.tempsMontageOutilMin*p.qteLancement)/60;
+  const tLaser5axH = p.decoupesLaser5axes===0 ? 0 : (30 + p.decoupesLaser5axes*p.qteLancement)/60;
+  const tCondH = p.tempsControleMin===0 ? 0 : (7 + p.tempsControleMin*p.qteLancement)/60;
+  const tempsTotalH = tLaserH+tDebitH+tEmbH+tPliageH+tMontageH+tLaser5axH+tCondH;
+
+  const coutLaser = tLaserH*115;
+  const coutDebit = tDebitH*65;
+  const coutEmbFab = tEmbH*90;
+  const coutPliage = tPliageH*90;
+  const coutRepriseMontage = tMontageH*65;
+  const coutLaser5Ax = tLaser5axH*150;
+  const coutCondition = tCondH*40;
+
+  const poidsLot = poidsPiece*p.qteLancement;
+  const coutLogistique = poidsLot < 30 ? 25 : (poidsLot < 100 ? poidsLot*0.5 : poidsLot*0.35);
+
+  const coutGlobal = (p.coutAdmin||0) + (p.coutAccessoire||0) + (p.coutMatiere||0) + coutLaser + coutDebit + coutEmbFab + coutPliage
+    + coutRepriseMontage + coutLaser5Ax + coutCondition + (p.coutEmballage||0) + (p.coutSousTraitance||0) + coutLogistique + (p.coutDivers||0);
+  const coutPieceUnit = p.qteLancement>0 ? coutGlobal/p.qteLancement : 0;
+  const prixVente = coutPieceUnit + coutPieceUnit*(p.margeAppliquee||0);
+  const prixVenteGlobal = prixVente*p.qteLancement;
+
+  return { poidsPiece, longueurCoupe, tempsDecoupeMin, tempsDebitMin,
+    tLaserH, tDebitH, tEmbH, tPliageH, tMontageH, tLaser5axH, tCondH, tempsTotalH,
+    coutLaser, coutDebit, coutEmbFab, coutPliage, coutRepriseMontage, coutLaser5Ax, coutCondition, coutLogistique,
+    coutGlobal, coutPieceUnit, prixVente, prixVenteGlobal };
+}
+
+/* Tableau matière — référence (feuille "tableau matière" du classeur) */
+const MATIERE_TABLE = [
+  { nom:'ACIER', utilisation:'—', re:'—', rm:'—', allongement:'—', prixKg:'—', vda:'CR1220Y1500T-MS-ZV45/45-U', european:'-', renault:'XE1200MS + ZV', arcelor:'MS1500 + Jetgal®' },
+  { nom:'XC / DC01 EN', utilisation:'—', re:'140-300', rm:'270-410', allongement:26, prixKg:'2000x1000x1 36€\n2000x1000x1,5 44€\n2000x1000x2 52€\n2000x1000x3 58€', vda:'CR210BH-G40/40-U ou G60/60-U', european:'HX220BD + Z', renault:'GXE220BH', arcelor:'AM220BH + Z' },
+  { nom:'DC02 AM', utilisation:'—', re:'170-300', rm:'270-400', allongement:28, prixKg:'—', vda:'CR270BH-G60/60-U', european:'HX300BD + Z', renault:'-', arcelor:'AM300BH +Z' },
+  { nom:'XE / DC03 EN', utilisation:'—', re:'140-260', rm:'270-370', allongement:35, prixKg:'—', vda:'CR270LA (Sens Long)', european:'HC300LA (sens Travers)', renault:'XE280D (sens Long)', arcelor:'AM HSLA300 (sens Travers)' },
+  { nom:'XES / DC04 AM', utilisation:'—', re:'140-230', rm:'270-350', allongement:36, prixKg:'2000x1000x2,5 70€', vda:'CR300LA-G60/60-U', european:'-', renault:'HX300LAD', arcelor:'-' },
+  { nom:'SES / DC05 EN', utilisation:'—', re:'140-200', rm:'270-330', allongement:38, prixKg:'—', vda:'CR270LA-G40/40-U ou G60/60 U (sens long)', european:'HX300LAD + Z (sens Travers)', renault:'GXE280D (sens long)', arcelor:'AM HSLA300 + Z (sens Travers)' },
+  { nom:'DC06 EN', utilisation:'—', re:'120-190', rm:'270-330', allongement:39, prixKg:'—', vda:'CR380LA-G40/40-U ou 60/60-U', european:'HX380LAD + Z', renault:'GXE360D', arcelor:'AM-HSLA380-CR +Z' },
+  { nom:'DC07 EN', utilisation:'—', re:'100-150', rm:'250-310', allongement:42, prixKg:'—', vda:'CR420LA-G40/40-U', european:'HX420LAD+Z', renault:'-', arcelor:'AM-HSLA420 +Z' },
+  { nom:'DP600', utilisation:'acier de roulage à froid', re:370, rm:635, allongement:25, prixKg:'—', vda:'CR460LA-G40/40-U', european:'HX460LAD +Z', renault:'-', arcelor:'AM-HSLA420 +Z' },
+  { nom:'DP690', utilisation:'—', re:600, rm:760, allongement:17, prixKg:'—', vda:'CR590Y980T-DP-G40/40-U', european:'HCT980X', renault:'GXE590B', arcelor:'AM-DP980' },
+  { nom:'DP780', utilisation:'—', re:480, rm:830, allongement:14, prixKg:'—', vda:'HR2-G40/40-U', european:'-', renault:'GHC', arcelor:'AM-13 +Z' },
+  { nom:'DP980', utilisation:'—', re:650, rm:1000, allongement:11, prixKg:'—', vda:'HR2-UC-U', european:'-', renault:'HC', arcelor:'AM-13' },
+  { nom:'DP1180', utilisation:'—', re:940, rm:1250, allongement:7, prixKg:'—', vda:'HR300LA-G40/40-U ou G60/60-U', european:'HX340LAD +Z', renault:'GHE320D', arcelor:'AM-HSLA320- HR + Z' },
+  { nom:'DX51D', utilisation:'acier doux formage à froid avec galva', re:'—', rm:'270-500', allongement:22, prixKg:'—', vda:'HR300LA-UC-U', european:'-', renault:'HE320D', arcelor:'AM-HSLA320-HR' },
+  { nom:'DX52D', utilisation:'—', re:'140-300', rm:'270-420', allongement:26, prixKg:'—', vda:'HR340LA-G40/40-U ou G60/60-U', european:'HX380LAD+Z', renault:'GHE360D', arcelor:'AM-HLSA360-HR +Z' },
+  { nom:'DX53D', utilisation:'—', re:'140-260', rm:'270-380', allongement:30, prixKg:'—', vda:'HR380LA-G40/40-U ou G60/60-U', european:'HX380LAD+Z', renault:'-', arcelor:'AM-HSLA380-HR +Z' },
+  { nom:'DX54D', utilisation:'—', re:'120-220', rm:'260-350', allongement:36, prixKg:'—', vda:'HR440Y580T-FB-G60/60-U', european:'HDT560F+Z', renault:'GHE450M', arcelor:'AM-FB560 + Z' },
+  { nom:'DX56D', utilisation:'—', re:'120-180', rm:'260-350', allongement:39, prixKg:'—', vda:'HR660Y780T-CP-G60/60-U', european:'HDT780C+Z', renault:'GHE660M', arcelor:'AM-CP800SF-HR' },
+  { nom:'E36', utilisation:'—', re:355, rm:'450-600', allongement:22, prixKg:'~3', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'E275D', utilisation:'—', re:300, rm:440, allongement:21, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'E335D / S315MC', utilisation:'—', re:315, rm:'390-510', allongement:20, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'E390D / S355MC', utilisation:'—', re:355, rm:'510-680', allongement:19, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HC260 LA', utilisation:'haute elasticité formage à froid', re:'260-330', rm:'350-430', allongement:26, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HC300 LA', utilisation:'—', re:'300-380', rm:'380-480', allongement:23, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HC340 LA', utilisation:'—', re:'340-420', rm:'410-510', allongement:21, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HC380 LA', utilisation:'—', re:'380-480', rm:'440-560', allongement:19, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HC420 LA', utilisation:'—', re:'420-520', rm:'470-590', allongement:17, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX220LAD', utilisation:'haute elasticité avec galva', re:'220-320', rm:'340-400', allongement:30, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX260LAD', utilisation:'—', re:'260-330', rm:'350-430', allongement:26, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX300LAD', utilisation:'—', re:'300-380', rm:'380-480', allongement:23, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX340LAD', utilisation:'—', re:'340-420', rm:'410-510', allongement:21, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX380LAD', utilisation:'—', re:'380-480', rm:'440-560', allongement:19, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX420LAD', utilisation:'—', re:'420-520', rm:'470-590', allongement:17, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX460LAD', utilisation:'—', re:'460-560', rm:'500-640', allongement:15, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HX500LAD', utilisation:'—', re:'500-620', rm:'530-690', allongement:13, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'S460MC', utilisation:'—', re:460, rm:'520-670', allongement:15, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'3C / DD13', utilisation:'—', re:'200-310', rm:'300-400', allongement:29, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'40CMD8', utilisation:'matrice/poinçon', re:1010, rm:850, allongement:11, prixKg:'~3', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'304L (1.4307)', utilisation:'—', re:'175-220', rm:'450-700', allongement:40, prixKg:'1000x2000x1 430€\n1000x2000x2 250€\n1000x2000x3 375€', vda:'-', european:'-', renault:'-', arcelor:'-' },
+  { nom:'HR660Y760T', utilisation:'—', re:'660-820', rm:'760-960', allongement:10, prixKg:'—', vda:'-', european:'-', renault:'-', arcelor:'-' },
+];
+
+let embPieceEditing = null;
+
+function renderEmbPiece(){
+  const view = document.getElementById('view');
+  if(embPieceEditing){ renderEmbPieceForm(); return; }
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Emboutissage</div>
+        <h1>Pièce</h1>
+        <div class="lede">Chiffrage détaillé d'une pièce embouttie : temps de production et coût de revient, pièce par pièce.</div>
+      </div>
+      <button class="btn primary" id="emb-piece-new">+ Nouvelle pièce</button>
+    </header>
+
+    ${embPieces.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Désignation</th><th>Qté lancement</th><th>Poids pièce</th><th>Coût pièce</th><th>Prix de vente</th><th>Prix vente lot</th><th>Modifié le</th><th></th></tr></thead>
+          <tbody>
+            ${embPieces.map(p=>{
+              const c = computePiece(p);
+              return `
+              <tr>
+                <td><b>${escapeHtml(p.nom||'(sans nom)')}</b></td>
+                <td>${p.qteLancement}</td>
+                <td>${c.poidsPiece.toFixed(2)} kg</td>
+                <td>${c.coutPieceUnit.toFixed(2)} €</td>
+                <td>${c.prixVente.toFixed(2)} €</td>
+                <td>${c.prixVenteGlobal.toFixed(2)} €</td>
+                <td>${formatDate(p.dateModification)}</td>
+                <td class="row-actions">
+                  <button class="btn small" data-emb-edit="${p.id}">Modifier</button>
+                  <button class="btn small danger" data-emb-del="${p.id}">Suppr.</button>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    ` : `<div class="empty" style="padding:36px 24px;"><b>Aucune pièce enregistrée</b>Clique sur « Nouvelle pièce » pour créer un premier chiffrage.</div>`}
+
+    <details style="margin-top:28px;">
+      <summary style="cursor:pointer;font-family:var(--display);font-size:14px;letter-spacing:.3px;color:var(--ink-dim);">Tableau des matières (référence)</summary>
+      <div class="table-wrap" style="margin-top:12px;">
+        <table style="min-width:900px;">
+          <thead><tr><th>Matière</th><th>Utilisation</th><th>Re (MPa)</th><th>Rm (MPa)</th><th>A (%)</th><th>Prix / kg ou tôle</th><th>VDA-SAE</th><th>European</th><th>Renault</th><th>ArcelorMittal</th></tr></thead>
+          <tbody>
+            ${MATIERE_TABLE.map(m=>`<tr>
+              <td>${escapeHtml(m.nom)}</td><td>${escapeHtml(String(m.utilisation||'—'))}</td><td>${escapeHtml(String(m.re||'—'))}</td><td>${escapeHtml(String(m.rm||'—'))}</td><td>${m.allongement??'—'}</td>
+              <td style="white-space:pre-line;">${escapeHtml(String(m.prixKg||'—'))}</td><td>${escapeHtml(m.vda||'—')}</td><td>${escapeHtml(m.european||'—')}</td><td>${escapeHtml(m.renault||'—')}</td><td>${escapeHtml(m.arcelor||'—')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  `;
+
+  document.getElementById('emb-piece-new').onclick = ()=>{
+    embPieceEditing = Object.assign(defaultEmbPiece(), { id: uid() });
+    render();
+  };
+  embPieces.forEach(p=>{
+    const editBtn = document.querySelector(`[data-emb-edit="${p.id}"]`);
+    if(editBtn) editBtn.onclick = ()=>{ embPieceEditing = JSON.parse(JSON.stringify(p)); render(); };
+    const delBtn = document.querySelector(`[data-emb-del="${p.id}"]`);
+    if(delBtn) delBtn.onclick = async ()=>{
+      if(!confirm(`Supprimer la pièce « ${p.nom||'(sans nom)'} » ?`)) return;
+      embPieces = embPieces.filter(x=>x.id!==p.id);
+      await saveEmbPieces();
+      toast('Pièce supprimée');
+      render();
+    };
+  });
+}
+
+function renderEmbPieceForm(){
+  const view = document.getElementById('view');
+  const p = embPieceEditing;
+  const c = computePiece(p);
+  const field = (label, key, opts={}) => `
+    <div class="field">
+      <label>${label}</label>
+      <input type="number" step="${opts.step||1}" data-field="${key}" value="${p[key]}" ${opts.min!=null?`min="${opts.min}"`:''}>
+    </div>`;
+
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Emboutissage · Pièce</div>
+        <h1>${p._fbId ? 'Modifier la pièce' : 'Nouvelle pièce'}</h1>
+        <div class="lede">Renseigne les données techniques de la pièce ; le temps de production et le coût de revient se calculent automatiquement.</div>
+      </div>
+    </header>
+
+    <div class="modal" style="max-width:720px;margin:0 0 24px;box-shadow:none;">
+      <div class="field"><label>Désignation de la pièce</label><input type="text" id="ep-nom" value="${escapeHtml(p.nom)}" placeholder="Ex. FERM INF PIED AVT"></div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Données pièce</h3>
+      <div class="grid3">
+        ${field('Qté de lancement','qteLancement',{min:1})}
+        ${field('Épaisseur (mm)','epaisseur',{step:0.1,min:0})}
+        ${field('Nb de pli','nbPli',{min:0})}
+      </div>
+      <div class="grid3">
+        ${field('Longueur flanc (mm)','longueurFlanc',{min:0})}
+        ${field('Largeur flanc (mm)','largeurFlanc',{min:0})}
+        ${field('Nb de soudure par points','nbSoudures',{min:0})}
+      </div>
+      <div class="grid3">
+        ${field('Nb de découpes','nbDecoupes',{min:0})}
+        ${field('Ø moyen des découpes (mm)','diametreDecoupes',{step:0.1,min:0})}
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Laser &amp; débit</h3>
+      <div class="grid3">
+        ${field('Vitesse de découpe laser (mm/min)','vitesseLaser',{min:1})}
+        ${field('Vitesse de découpe débit (mm/min)','vitesseDebit',{min:1})}
+        ${field('Hauteur de coupe débit (mm)','hauteurCoupeDebit',{min:0})}
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Emboutissage, pliage, montage</h3>
+      <div class="grid3">
+        ${field('Emboutissage (min)','tempsEmboutissageMin',{step:0.1,min:0})}
+        ${field('Pliage (min)','tempsPliageMin',{step:0.1,min:0})}
+        ${field('Montage outil (min)','tempsMontageOutilMin',{step:0.1,min:0})}
+      </div>
+      <div class="grid3">
+        ${field('Découpes laser 5 axes (nb)','decoupesLaser5axes',{min:0})}
+        ${field('Contrôle (min)','tempsControleMin',{step:0.01,min:0})}
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coûts &amp; marge</h3>
+      <div class="grid3">
+        ${field('Administratif / chiffrage (€)','coutAdmin',{min:0})}
+        ${field('Accessoire / quincaillerie (€)','coutAccessoire',{min:0})}
+        ${field('Matière (€) — Acier 3€ / Alu 5€ / Inox 6€ le kg','coutMatiere',{step:0.01,min:0})}
+      </div>
+      <div class="grid3">
+        ${field('Emballage (€)','coutEmballage',{min:0})}
+        ${field('Sous-traitance (€)','coutSousTraitance',{min:0})}
+        ${field('Divers (majoration/minoration) (€)','coutDivers',{min:0})}
+      </div>
+      <div class="field" style="max-width:260px;"><label>Marge appliquée</label><input type="number" step="0.01" id="ep-marge" value="${p.margeAppliquee}"></div>
+    </div>
+
+    <div class="modal" style="max-width:720px;margin:0 0 24px;box-shadow:none;">
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:0 0 12px;color:var(--ink-dim);">Production — temps alloué</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Opération</th><th>Temps alloué</th></tr></thead>
+          <tbody>
+            <tr><td>Laser</td><td>${c.tLaserH.toFixed(3)} h</td></tr>
+            <tr><td>Débit</td><td>${c.tDebitH.toFixed(3)} h</td></tr>
+            <tr><td>Emboutissage</td><td>${c.tEmbH.toFixed(3)} h</td></tr>
+            <tr><td>Pliage</td><td>${c.tPliageH.toFixed(3)} h</td></tr>
+            <tr><td>Reprise / montage</td><td>${c.tMontageH.toFixed(3)} h</td></tr>
+            <tr><td>Laser 5 axes</td><td>${c.tLaser5axH.toFixed(3)} h</td></tr>
+            <tr><td>Conditionnement</td><td>${c.tCondH.toFixed(3)} h</td></tr>
+            <tr style="font-weight:600;"><td>Total</td><td>${c.tempsTotalH.toFixed(3)} h</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 12px;color:var(--ink-dim);">Coûts</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Poste</th><th>Coût global (lot)</th></tr></thead>
+          <tbody>
+            <tr><td>Administratif / chiffrage</td><td>${p.coutAdmin.toFixed(2)} €</td></tr>
+            <tr><td>Accessoire / quincaillerie</td><td>${p.coutAccessoire.toFixed(2)} €</td></tr>
+            <tr><td>Matière</td><td>${p.coutMatiere.toFixed(2)} €</td></tr>
+            <tr><td>Laser (150€/h)</td><td>${c.coutLaser.toFixed(2)} €</td></tr>
+            <tr><td>Débit</td><td>${c.coutDebit.toFixed(2)} €</td></tr>
+            <tr><td>Emboutissage</td><td>${c.coutEmbFab.toFixed(2)} €</td></tr>
+            <tr><td>Pliage</td><td>${c.coutPliage.toFixed(2)} €</td></tr>
+            <tr><td>Reprise / montage</td><td>${c.coutRepriseMontage.toFixed(2)} €</td></tr>
+            <tr><td>Laser 5 axes</td><td>${c.coutLaser5Ax.toFixed(2)} €</td></tr>
+            <tr><td>Conditionnement</td><td>${c.coutCondition.toFixed(2)} €</td></tr>
+            <tr><td>Emballage</td><td>${p.coutEmballage.toFixed(2)} €</td></tr>
+            <tr><td>Sous-traitance</td><td>${p.coutSousTraitance.toFixed(2)} €</td></tr>
+            <tr><td>Logistique</td><td>${c.coutLogistique.toFixed(2)} €</td></tr>
+            <tr><td>Divers</td><td>${p.coutDivers.toFixed(2)} €</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid3" style="margin-top:16px;">
+        <div class="result-card"><div style="font-family:var(--display);font-size:20px;">${c.poidsPiece.toFixed(2)} kg</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">poids pièce</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:20px;">${c.coutGlobal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">coût global (lot de ${p.qteLancement})</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:20px;">${c.coutPieceUnit.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">coût / pièce</div></div>
+      </div>
+      <div class="result-card" style="text-align:center;margin-top:16px;">
+        <div style="font-size:12px;color:var(--ink-dim);">Prix de vente / pièce (marge ${(p.margeAppliquee*100).toFixed(0)}%)</div>
+        <div style="font-family:var(--display);font-size:28px;color:var(--accent);margin-top:4px;">${c.prixVente.toFixed(2)} €</div>
+        <div style="font-size:12px;color:var(--ink-dim);margin-top:10px;">Prix de vente global du lot : <b style="color:var(--ink);">${c.prixVenteGlobal.toFixed(2)} €</b></div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn primary" id="ep-save">Enregistrer la pièce</button>
+        <button class="btn" id="ep-cancel">Annuler</button>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-field]').forEach(inp=>{
+    inp.onchange = (e)=>{
+      const key = e.target.dataset.field;
+      p[key] = parseFloat(e.target.value) || 0;
+      renderEmbPieceForm();
+    };
+  });
+  document.getElementById('ep-nom').onchange = (e)=>{ p.nom = e.target.value; };
+  document.getElementById('ep-marge').onchange = (e)=>{ p.margeAppliquee = parseFloat(e.target.value)||0; renderEmbPieceForm(); };
+
+  document.getElementById('ep-save').onclick = async ()=>{
+    if(!p.nom || !p.nom.trim()){ toast('Indique une désignation pour la pièce'); return; }
+    if(!p.dateCreation) p.dateCreation = new Date().toISOString();
+    const idx = embPieces.findIndex(x=>x.id===p.id);
+    if(idx>=0) embPieces[idx] = p; else embPieces.push(p);
+    await saveEmbPieces();
+    toast('Pièce enregistrée');
+    embPieceEditing = null;
+    render();
+  };
+  document.getElementById('ep-cancel').onclick = ()=>{ embPieceEditing = null; render(); };
+}
+
+/* ---------------------------------------------------------
+   EMBOUTISSAGE — OUTILLAGE
+   (reprend la feuille "outil FERM INF PIED AVT" + l'abaque d'usinage)
+--------------------------------------------------------- */
+function defaultEmbOutil(){
+  return {
+    nom: '',
+    pieceLongueur: 800, pieceLargeur: 250, pieceHauteur: 120,
+    matMatrice: 0, matPoincon: 0, matSerreFlan: 0,
+    moRows: [
+      { label:'programmation', hg:1, chg:60, hd:1, chd:60 },
+      { label:'CAO', hg:14, chg:75, hd:7, chd:75 },
+      { label:'MAP', hg:6, chg:75, hd:6, chd:75 },
+      { label:'ELECTRO EROSION FOND MOBILE', hg:10, chg:120, hd:10, chd:120 },
+      { label:'USINAGES', hg:55, chg:85, hd:55, chd:85 },
+      { label:'prog las5a + montage', hg:5, chg:85, hd:5, chd:85 },
+    ],
+    dateCreation: null, dateModification: null
+  };
+}
+
+function computeOutil(o){
+  const matriceL = o.pieceLongueur+160, matriceW = o.pieceLargeur+160, matriceH = o.pieceHauteur+50;
+  const poinconL = o.pieceLongueur, poinconW = o.pieceLargeur, poinconH = o.pieceHauteur+50;
+  const serreFlanL = matriceL, serreFlanW = matriceW, serreFlanH = 30;
+  const matiereTotal = (o.matMatrice||0) + (o.matPoincon||0) + (o.matSerreFlan||0);
+  const rows = (o.moRows||[]).map(r=>Object.assign({}, r, { totG: (r.hg||0)*(r.chg||0), totD: (r.hd||0)*(r.chd||0) }));
+  const sumG = rows.reduce((s,r)=>s+r.totG,0);
+  const sumD = rows.reduce((s,r)=>s+r.totD,0);
+  const totalMainG = sumG + matiereTotal;
+  const totalMainD = sumD + matiereTotal;
+  return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, matiereTotal, rows, sumG, sumD, totalMainG, totalMainD };
+}
+
+/* Abaque usinage outil — référence (feuille "abaque usinage outil" du classeur) */
+const ABAQUE_USINAGE = [
+  {l:270,w:180,h:30,prixMatiere:null,prixUsinage:1080,note:null},
+  {l:230,w:130,h:50,prixMatiere:null,prixUsinage:930,note:'FOND MOBILE'},
+  {l:240,w:75,h:100,prixMatiere:null,prixUsinage:630,note:null},
+  {l:240,w:160,h:60,prixMatiere:null,prixUsinage:780,note:null},
+  {l:457,w:174,h:30,prixMatiere:null,prixUsinage:1750,note:'SGD'},
+  {l:300,w:200,h:50,prixMatiere:null,prixUsinage:1200,note:'SGD'},
+  {l:220,w:150,h:100,prixMatiere:null,prixUsinage:1160,note:'SGD'},
+  {l:430,w:257,h:30,prixMatiere:null,prixUsinage:1140,note:null},
+  {l:340,w:190,h:70,prixMatiere:null,prixUsinage:1340,note:null},
+  {l:330,w:210,h:70,prixMatiere:null,prixUsinage:1030,note:null},
+  {l:290,w:220,h:90,prixMatiere:null,prixUsinage:2000,note:null},
+  {l:270,w:240,h:90,prixMatiere:null,prixUsinage:960,note:null},
+  {l:410,w:245,h:60,prixMatiere:null,prixUsinage:1770,note:null},
+  {l:370,w:340,h:50,prixMatiere:null,prixUsinage:1560,note:null},
+  {l:500,w:480,h:30,prixMatiere:null,prixUsinage:1460,note:null},
+  {l:320,w:230,h:100,prixMatiere:null,prixUsinage:2460,note:'SGD'},
+  {l:360,w:275,h:80,prixMatiere:null,prixUsinage:1620,note:null},
+  {l:310,w:210,h:130,prixMatiere:null,prixUsinage:1680,note:'FOND MOBILE'},
+  {l:480,w:300,h:90,prixMatiere:null,prixUsinage:2800,note:null},
+  {l:1000,w:480,h:30,prixMatiere:null,prixUsinage:1780,note:null},
+  {l:660,w:250,h:100,prixMatiere:null,prixUsinage:3460,note:'FOND MOBILE'},
+  {l:420,w:380,h:110,prixMatiere:null,prixUsinage:2090,note:null},
+  {l:400,w:400,h:110,prixMatiere:null,prixUsinage:1860,note:null},
+  {l:450,w:280,h:155,prixMatiere:386,prixUsinage:2500,note:null},
+  {l:700,w:400,h:85,prixMatiere:null,prixUsinage:2340,note:null},
+  {l:700,w:400,h:90,prixMatiere:430,prixUsinage:2340,note:null},
+  {l:650,w:390,h:100,prixMatiere:null,prixUsinage:3750,note:null},
+  {l:450,w:400,h:150,prixMatiere:null,prixUsinage:2360,note:null},
+  {l:880,w:410,h:80,prixMatiere:null,prixUsinage:5857,note:null},
+  {l:860,w:370,h:110,prixMatiere:null,prixUsinage:3480,note:null},
+  {l:500,w:420,h:170,prixMatiere:null,prixUsinage:3420,note:null},
+  {l:650,w:550,h:140,prixMatiere:927,prixUsinage:3500,note:null},
+  {l:820,w:640,h:110,prixMatiere:null,prixUsinage:5500,note:null},
+  {l:820,w:640,h:110,prixMatiere:null,prixUsinage:5480,note:null},
+  {l:900,w:800,h:170,prixMatiere:null,prixUsinage:3740,note:null},
+  {l:1040,w:400,h:330,prixMatiere:2400,prixUsinage:9400,note:null},
+  {l:800,w:700,h:280,prixMatiere:4700,prixUsinage:11200,note:null},
+  {l:800,w:500,h:270,prixMatiere:null,prixUsinage:6600,note:'FOYART'},
+  {l:800,w:500,h:300,prixMatiere:null,prixUsinage:10640,note:'FOYART'},
+  {l:800,w:500,h:270,prixMatiere:null,prixUsinage:10160,note:'FOYART'},
+  {l:1000,w:600,h:300,prixMatiere:null,prixUsinage:9400,note:null},
+];
+
+let embOutilEditing = null;
+
+function renderEmbOutil(){
+  const view = document.getElementById('view');
+  if(embOutilEditing){ renderEmbOutilForm(); return; }
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Emboutissage</div>
+        <h1>Outillage</h1>
+        <div class="lede">Dimensionnement de l'outil (matrice / poinçon / serre-flan) et coût de fabrication — matière + main d'oeuvre.</div>
+      </div>
+      <button class="btn primary" id="emb-outil-new">+ Nouvel outil</button>
+    </header>
+
+    ${embOutils.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Désignation</th><th>Pièce (L×l×h)</th><th>Matière outil</th><th>Total MAIN G</th><th>Total MAIN D</th><th>Modifié le</th><th></th></tr></thead>
+          <tbody>
+            ${embOutils.map(o=>{
+              const c = computeOutil(o);
+              return `
+              <tr>
+                <td><b>${escapeHtml(o.nom||'(sans nom)')}</b></td>
+                <td>${o.pieceLongueur}×${o.pieceLargeur}×${o.pieceHauteur} mm</td>
+                <td>${c.matiereTotal.toFixed(2)} €</td>
+                <td>${c.totalMainG.toFixed(2)} €</td>
+                <td>${c.totalMainD.toFixed(2)} €</td>
+                <td>${formatDate(o.dateModification)}</td>
+                <td class="row-actions">
+                  <button class="btn small" data-out-edit="${o.id}">Modifier</button>
+                  <button class="btn small danger" data-out-del="${o.id}">Suppr.</button>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    ` : `<div class="empty" style="padding:36px 24px;"><b>Aucun outil enregistré</b>Clique sur « Nouvel outil » pour un premier chiffrage.</div>`}
+
+    <details style="margin-top:28px;">
+      <summary style="cursor:pointer;font-family:var(--display);font-size:14px;letter-spacing:.3px;color:var(--ink-dim);">Abaque usinage outil (référence)</summary>
+      <div class="table-wrap" style="margin-top:12px;">
+        <table style="min-width:760px;">
+          <thead><tr><th>Longueur</th><th>Largeur</th><th>Hauteur</th><th>Prix matière</th><th>Prix usinage</th><th>Note</th><th>Volume (m³)</th><th>Prix usinage /m³</th><th>Nb heures usinage</th></tr></thead>
+          <tbody>
+            ${ABAQUE_USINAGE.map(a=>{
+              const vol = a.l*a.w*a.h*1e-9;
+              const prixM3 = vol>0 ? a.prixUsinage/vol : 0;
+              const heures = a.prixUsinage/85;
+              return `<tr>
+                <td>${a.l}</td><td>${a.w}</td><td>${a.h}</td><td>${a.prixMatiere!=null?a.prixMatiere+' €':'—'}</td><td>${a.prixUsinage} €</td><td>${escapeHtml(a.note||'—')}</td>
+                <td>${vol.toFixed(5)}</td><td>${Math.round(prixM3).toLocaleString('fr-FR')} €</td><td>${heures.toFixed(1)} h</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot><tr style="font-weight:600;"><td colspan="6">Moyenne /m³</td><td></td><td>${Math.round(ABAQUE_USINAGE.reduce((s,a)=>{const vol=a.l*a.w*a.h*1e-9; return s+(vol>0?a.prixUsinage/vol:0);},0)/ABAQUE_USINAGE.length).toLocaleString('fr-FR')} €</td><td></td></tr></tfoot>
+        </table>
+      </div>
+    </details>
+  `;
+
+  document.getElementById('emb-outil-new').onclick = ()=>{
+    embOutilEditing = Object.assign(defaultEmbOutil(), { id: uid() });
+    render();
+  };
+  embOutils.forEach(o=>{
+    const editBtn = document.querySelector(`[data-out-edit="${o.id}"]`);
+    if(editBtn) editBtn.onclick = ()=>{ embOutilEditing = JSON.parse(JSON.stringify(o)); render(); };
+    const delBtn = document.querySelector(`[data-out-del="${o.id}"]`);
+    if(delBtn) delBtn.onclick = async ()=>{
+      if(!confirm(`Supprimer l'outil « ${o.nom||'(sans nom)'} » ?`)) return;
+      embOutils = embOutils.filter(x=>x.id!==o.id);
+      await saveEmbOutils();
+      toast('Outil supprimé');
+      render();
+    };
+  });
+}
+
+function renderEmbOutilForm(){
+  const view = document.getElementById('view');
+  const o = embOutilEditing;
+  const c = computeOutil(o);
+
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Emboutissage · Outillage</div>
+        <h1>${o._fbId ? "Modifier l'outil" : "Nouvel outil"}</h1>
+        <div class="lede">Entre les dimensions de la pièce en mm (prévoir 5 à 10/10 mm de plus par pièce) ; les dimensions de la matrice, du poinçon et du serre-flan se déduisent automatiquement.</div>
+      </div>
+    </header>
+
+    <div class="modal" style="max-width:720px;margin:0 0 24px;box-shadow:none;">
+      <div class="field"><label>Désignation de l'outil</label><input type="text" id="eo-nom" value="${escapeHtml(o.nom)}" placeholder="Ex. FERM INF PIED AVT"></div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de la pièce (mm)</h3>
+      <div class="grid3">
+        <div class="field"><label>Longueur</label><input type="number" data-ofield="pieceLongueur" value="${o.pieceLongueur}" min="0"></div>
+        <div class="field"><label>Largeur</label><input type="number" data-ofield="pieceLargeur" value="${o.pieceLargeur}" min="0"></div>
+        <div class="field"><label>Hauteur</label><input type="number" data-ofield="pieceHauteur" value="${o.pieceHauteur}" min="0"></div>
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (déduites)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>Matrice (42CMD8)</th><th>Poinçon (42CMD8)</th><th>Serre-flan (E36)</th></tr></thead>
+          <tbody>
+            <tr><td>Longueur</td><td>${c.matriceL} mm</td><td>${c.poinconL} mm</td><td>${c.serreFlanL} mm</td></tr>
+            <tr><td>Largeur</td><td>${c.matriceW} mm</td><td>${c.poinconW} mm</td><td>${c.serreFlanW} mm</td></tr>
+            <tr><td>Hauteur</td><td>${c.matriceH} mm</td><td>${c.poinconH} mm</td><td>${c.serreFlanH} mm</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière (1 main) — à reporter de l'abaque usinage ci-dessous</h3>
+      <div class="grid3">
+        <div class="field"><label>Matrice (€)</label><input type="number" step="0.01" data-ofield="matMatrice" value="${o.matMatrice}" min="0"></div>
+        <div class="field"><label>Poinçon (€)</label><input type="number" step="0.01" data-ofield="matPoincon" value="${o.matPoincon}" min="0"></div>
+        <div class="field"><label>Serre-flan (€)</label><input type="number" step="0.01" data-ofield="matSerreFlan" value="${o.matSerreFlan}" min="0"></div>
+      </div>
+      <div class="result-card" style="max-width:260px;"><div style="font-family:var(--display);font-size:18px;">${c.matiereTotal.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total matière (1 main)</div></div>
+
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Main d'oeuvre de fabrication</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Opération</th><th>MAIN G — heures</th><th>MAIN G — €/h</th><th>MAIN G — total</th><th>MAIN D — heures</th><th>MAIN D — €/h</th><th>MAIN D — total</th><th></th></tr></thead>
+          <tbody>
+            ${o.moRows.map((r,i)=>`
+              <tr>
+                <td><input type="text" data-mo-field="label" data-mo-idx="${i}" value="${escapeHtml(r.label)}" style="width:170px;"></td>
+                <td><input type="number" step="0.5" data-mo-field="hg" data-mo-idx="${i}" value="${r.hg}" style="width:70px;"></td>
+                <td><input type="number" data-mo-field="chg" data-mo-idx="${i}" value="${r.chg}" style="width:70px;"></td>
+                <td>${(r.hg*r.chg).toFixed(2)} €</td>
+                <td><input type="number" step="0.5" data-mo-field="hd" data-mo-idx="${i}" value="${r.hd}" style="width:70px;"></td>
+                <td><input type="number" data-mo-field="chd" data-mo-idx="${i}" value="${r.chd}" style="width:70px;"></td>
+                <td>${(r.hd*r.chd).toFixed(2)} €</td>
+                <td><button class="btn ghost" data-mo-del="${i}" title="Supprimer la ligne">✕</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;margin-top:10px;">
+        <button class="btn small" id="eo-add-row">+ Ajouter une ligne</button>
+      </div>
+
+      <div class="grid2" style="margin-top:16px;">
+        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainG.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN G (matière + usinage)</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${c.totalMainD.toFixed(2)} €</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">total outil — MAIN D (matière + usinage)</div></div>
+      </div>
+
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn primary" id="eo-save">Enregistrer l'outil</button>
+        <button class="btn" id="eo-cancel">Annuler</button>
+      </div>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-ofield]').forEach(inp=>{
+    inp.onchange = (e)=>{
+      o[e.target.dataset.ofield] = parseFloat(e.target.value) || 0;
+      renderEmbOutilForm();
+    };
+  });
+  document.getElementById('eo-nom').onchange = (e)=>{ o.nom = e.target.value; };
+
+  document.querySelectorAll('[data-mo-field]').forEach(inp=>{
+    inp.onchange = (e)=>{
+      const idx = parseInt(e.target.dataset.moIdx);
+      const f = e.target.dataset.moField;
+      o.moRows[idx][f] = (f==='label') ? e.target.value : (parseFloat(e.target.value)||0);
+      renderEmbOutilForm();
+    };
+  });
+  document.querySelectorAll('[data-mo-del]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const idx = parseInt(btn.dataset.moDel);
+      o.moRows.splice(idx,1);
+      renderEmbOutilForm();
+    };
+  });
+  document.getElementById('eo-add-row').onclick = ()=>{
+    o.moRows.push({ label:'', hg:0, chg:0, hd:0, chd:0 });
+    renderEmbOutilForm();
+  };
+
+  document.getElementById('eo-save').onclick = async ()=>{
+    if(!o.nom || !o.nom.trim()){ toast("Indique une désignation pour l'outil"); return; }
+    if(!o.dateCreation) o.dateCreation = new Date().toISOString();
+    const idx = embOutils.findIndex(x=>x.id===o.id);
+    if(idx>=0) embOutils[idx] = o; else embOutils.push(o);
+    await saveEmbOutils();
+    toast('Outil enregistré');
+    embOutilEditing = null;
+    render();
+  };
+  document.getElementById('eo-cancel').onclick = ()=>{ embOutilEditing = null; render(); };
 }
 
 if('serviceWorker' in navigator){
