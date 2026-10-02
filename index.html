@@ -2718,6 +2718,136 @@ function parseStepBoundingBox3D(text){
   return { longueur, largeur, hauteur, volume: (longueur*largeur*hauteur)/1e9 };
 }
 
+/* ---------------------------------------------------------
+   VISUALISATION APPROXIMATIVE D'UN FICHIER STEP (fil de fer)
+   On reconstruit chaque arête de la pièce (EDGE_CURVE) :
+   - les arêtes portées par une B-spline (B_SPLINE_CURVE_WITH_KNOTS, non rationnelle) sont
+     échantillonnées par l'algorithme de De Boor pour suivre la vraie courbe ;
+   - les autres (LINE, CIRCLE...) sont tracées en corde droite entre les deux sommets de l'arête.
+   C'est une approximation filaire (pas un rendu solide), suffisante pour vérifier la forme
+   générale de la pièce avant usinage de l'outil.
+--------------------------------------------------------- */
+function parseStepWireframe(text){
+  const pts = stepCartesianPoints(text);
+
+  const vertexPt = {};
+  const vertexRe = /#(\d+)\s*=\s*VERTEX_POINT\s*\(\s*'[^']*'\s*,\s*#(\d+)\s*\)/g;
+  let m;
+  while((m = vertexRe.exec(text))){ const p = pts[m[2]]; if(p) vertexPt[m[1]] = p; }
+
+  const bsplines = {};
+  const bsRe = /#(\d+)\s*=\s*B_SPLINE_CURVE_WITH_KNOTS\s*\(\s*'[^']*'\s*,\s*(\d+)\s*,\s*\(([^)]+)\)\s*,[^,]+,[^,]+,[^,]+,\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)/g;
+  while((m = bsRe.exec(text))){
+    bsplines[m[1]] = {
+      degree: parseInt(m[2], 10),
+      cpIds: m[3].split(',').map(s=>s.trim().replace('#','')),
+      knotMult: m[4].split(',').map(s=>parseInt(s.trim(),10)),
+      knotVals: m[5].split(',').map(s=>parseFloat(s.trim()))
+    };
+  }
+
+  const edges = [];
+  const edgeRe = /#(\d+)\s*=\s*EDGE_CURVE\s*\(\s*'[^']*'\s*,\s*#(\d+)\s*,\s*#(\d+)\s*,\s*#(\d+)\s*,\s*\.[TF]\.\s*\)/g;
+  while((m = edgeRe.exec(text))){ edges.push({ v1:m[2], v2:m[3], curve:m[4] }); }
+
+  function expandKnots(mult, vals){
+    const out = [];
+    for(let i=0;i<mult.length;i++) for(let j=0;j<mult[i];j++) out.push(vals[i]);
+    return out;
+  }
+  // Algorithme de De Boor : évalue un point sur une B-spline (non rationnelle) de degré p,
+  // vecteur de noeuds U, points de contrôle Pw, au paramètre u.
+  function deBoor(p, U, Pw, u){
+    const n = Pw.length - 1;
+    let k = p;
+    while(k < n && u >= U[k+1]) k++;
+    if(u >= U[U.length-1-p]) k = n;
+    const d = [];
+    for(let i=0;i<=p;i++) d[i] = Pw[k-p+i].slice();
+    for(let r=1;r<=p;r++){
+      for(let i=p;i>=r;i--){
+        const denom = U[k+1+i-r] - U[k+i-p];
+        const alpha = denom!==0 ? (u - U[k+i-p])/denom : 0;
+        d[i] = [0,1,2].map(ax => (1-alpha)*d[i-1][ax] + alpha*d[i][ax]);
+      }
+    }
+    return d[p];
+  }
+
+  const polylines = [];
+  edges.forEach(e=>{
+    const p1 = vertexPt[e.v1], p2 = vertexPt[e.v2];
+    if(!p1 || !p2) return;
+    const bs = bsplines[e.curve];
+    if(bs){
+      const cps = bs.cpIds.map(id=>pts[id]);
+      if(cps.every(Boolean) && cps.length > bs.degree){
+        const U = expandKnots(bs.knotMult, bs.knotVals);
+        const uStart = U[bs.degree], uEnd = U[U.length-1-bs.degree];
+        const N = 10;
+        const line = [];
+        for(let i=0;i<=N;i++){
+          const u = (i===N) ? uEnd - 1e-9 : uStart + (uEnd-uStart)*(i/N);
+          line.push(deBoor(bs.degree, U, cps, u));
+        }
+        polylines.push(line);
+        return;
+      }
+    }
+    polylines.push([p1, p2]);
+  });
+  return polylines;
+}
+
+/* Construit le SVG du viewer (projection 2D sur les deux axes de plus grande étendue).
+   mirrorPolylines, si fourni, est tracé en plus (en rouge) — utilisé pour prévisualiser
+   la pièce et son symétrique côte à côte. */
+function buildStepWireframeSvg(polylines, mirrorPolylines){
+  const allPts = [];
+  polylines.forEach(line=>line.forEach(p=>allPts.push(p)));
+  if(mirrorPolylines) mirrorPolylines.forEach(line=>line.forEach(p=>allPts.push(p)));
+  if(!allPts.length) return '<div class="empty" style="padding:24px;">Aucune géométrie exploitable dans ce fichier.</div>';
+
+  const ranges = [0,1,2].map(ax=>{
+    let mn=Infinity, mx=-Infinity;
+    allPts.forEach(p=>{ if(p[ax]<mn)mn=p[ax]; if(p[ax]>mx)mx=p[ax]; });
+    return { ax, mn, mx, span: mx-mn };
+  }).sort((a,b)=> b.span - a.span);
+  const uRange = ranges[0], vRange = ranges[1];
+
+  const w = Math.max(1, uRange.span), h = Math.max(1, vRange.span);
+  const pad = Math.max(w,h)*0.05;
+  const vbW = w+pad*2, vbH = h+pad*2;
+  const sx = p => (p[uRange.ax]-uRange.mn+pad).toFixed(2);
+  const sy = p => (vbH - (p[vRange.ax]-vRange.mn+pad)).toFixed(2);
+  const strokeW = (Math.max(w,h)*0.0025).toFixed(3);
+
+  function pathFor(lines, color){
+    return lines.map(line=>{
+      const d = line.map(p=>`${sx(p)},${sy(p)}`).join(' ');
+      return `<polyline points="${d}" fill="none" stroke="${color}" stroke-width="${strokeW}"/>`;
+    }).join('');
+  }
+
+  return `<svg width="100%" height="100%" viewBox="0 0 ${vbW} ${vbH}" preserveAspectRatio="xMidYMid meet" style="background:#fff;display:block;">
+    <g>${pathFor(polylines, '#1a1a1a')}</g>
+    ${mirrorPolylines ? `<g>${pathFor(mirrorPolylines, '#c1443c')}</g>` : ''}
+  </svg>`;
+}
+
+/* Calcule la pièce symétrique (miroir sur l'axe X=0 ou Y=1), accolée avec un espace de 50 mm,
+   pour une prévisualisation côte à côte — même logique que l'effet "symétrique" de l'outillage. */
+function mirrorStepWireframe(polylines, axisIndex, gap){
+  let mx = -Infinity;
+  polylines.forEach(line=>line.forEach(p=>{ if(p[axisIndex]>mx) mx=p[axisIndex]; }));
+  if(!isFinite(mx)) return polylines;
+  return polylines.map(line=>line.map(p=>{
+    const q = p.slice();
+    q[axisIndex] = 2*mx + gap - p[axisIndex];
+    return q;
+  }));
+}
+
 function computeOutil(o){
   // Outillage symétrique : si l'outil produit la pièce et son symétrique en une seule frappe,
   // on double la dimension pièce sur l'axe choisi (X ou Y) et on ajoute 50 mm (espace entre les deux moitiés)
@@ -2839,6 +2969,7 @@ function abaqueMoyennePrixM3(){
 }
 
 let embOutilEditing = null;
+let embOutilWireframe = null; // polylignes 3D de la pièce chargée (fil de fer), non persisté
 
 function renderEmbOutil(){
   const view = document.getElementById('view');
@@ -2903,11 +3034,12 @@ function renderEmbOutil(){
 
   document.getElementById('emb-outil-new').onclick = ()=>{
     embOutilEditing = Object.assign(defaultEmbOutil(), { id: uid() });
+    embOutilWireframe = null;
     render();
   };
   embOutils.forEach(o=>{
     const editBtn = document.querySelector(`[data-out-edit="${o.id}"]`);
-    if(editBtn) editBtn.onclick = ()=>{ embOutilEditing = JSON.parse(JSON.stringify(o)); render(); };
+    if(editBtn) editBtn.onclick = ()=>{ embOutilEditing = JSON.parse(JSON.stringify(o)); embOutilWireframe = null; render(); };
     const delBtn = document.querySelector(`[data-out-del="${o.id}"]`);
     if(delBtn) delBtn.onclick = async ()=>{
       if(!confirm(`Supprimer l'outil « ${o.nom||'(sans nom)'} » ?`)) return;
@@ -2982,6 +3114,22 @@ function renderEmbOutilForm(){
           </select>
         </div>
         <div style="font-size:12px;color:var(--ink-dim);margin:-4px 0 10px;">La dimension pièce sur l'axe ${c.symAxe} est doublée puis +50 mm avant de dimensionner l'outil : ${c.symAxe==='X'?`${o.pieceLongueur} → ${c.effLongueur} mm`:`${o.pieceLargeur} → ${c.effLargeur} mm`}.</div>
+      ` : ''}
+
+      ${embOutilWireframe ? `
+        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Visualisation de la pièce${o.symetrique?' (en rouge : son symétrique)':''}</h3>
+        <div style="overflow-x:auto;margin-bottom:8px;">
+          <div id="step-viewer" class="dxf-viewer" style="width:100%;max-width:700px;height:420px;border:1px solid var(--line);border-radius:var(--radius);">
+            ${buildStepWireframeSvg(embOutilWireframe, o.symetrique ? mirrorStepWireframe(embOutilWireframe, o.symetrieAxe==='Y'?1:0, 50) : null)}
+            <div class="dxf-viewer-controls">
+              <button data-zoom-in title="Zoomer">+</button>
+              <button data-zoom-out title="Dézoomer">−</button>
+              <button data-zoom-reset title="Réinitialiser">⤾</button>
+            </div>
+            <div class="dxf-viewer-hint">Molette / pincement = zoom · glisser = déplacer</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--ink-dim);margin:0 0 18px;">Visualisation filaire approximative reconstruite depuis le fichier STEP (projection 2D sur les deux plus grandes dimensions) — pas un rendu solide, à vérifier.</div>
       ` : ''}
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (déduites)</h3>
@@ -3101,6 +3249,7 @@ function renderEmbOutilForm(){
       o.pieceLongueur = bbox.longueur; o.pieceLargeur = bbox.largeur; o.pieceHauteur = bbox.hauteur;
       o.pieceFileName = file.name;
       o.nom = file.name.replace(/\.(stp|step)$/i, '');
+      try{ embOutilWireframe = parseStepWireframe(text); }catch(werr){ console.error(werr); embOutilWireframe = null; }
       toast(`Pièce lue : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm (volume ≈ ${bbox.volume.toFixed(5)} m³)`);
       renderEmbOutilForm();
     }catch(err){
@@ -3117,9 +3266,12 @@ function renderEmbOutilForm(){
     await saveEmbOutils();
     toast('Outil enregistré');
     embOutilEditing = null;
+    embOutilWireframe = null;
     render();
   };
-  document.getElementById('eo-cancel').onclick = ()=>{ embOutilEditing = null; render(); };
+  document.getElementById('eo-cancel').onclick = ()=>{ embOutilEditing = null; embOutilWireframe = null; render(); };
+
+  if(embOutilWireframe){ attachDxfZoomPan('step-viewer'); }
 }
 
 if('serviceWorker' in navigator){
