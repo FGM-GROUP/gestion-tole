@@ -1290,15 +1290,39 @@ function parseDxfBoundingBox(text){
   return { longueur: Math.round(maxX-minX), largeur: Math.round(maxY-minY) };
 }
 
-function parseStepBoundingBoxApprox(text){
-  const re = /CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]+)\)/g;
-  let m, minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+/* Table de tous les CARTESIAN_POINT du fichier STEP, indexée par identifiant #id.
+   Partagée par les deux lecteurs STEP approximatifs de l'application. */
+function stepCartesianPoints(text){
+  const re = /#(\d+)\s*=\s*CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]+)\)\s*\)/g;
+  const pts = {};
+  let m;
   while((m = re.exec(text))){
-    const parts = m[1].split(',').map(s=>parseFloat(s.trim()));
-    if(parts.length>=2 && isFinite(parts[0]) && isFinite(parts[1])){
-      if(parts[0]<minX)minX=parts[0]; if(parts[0]>maxX)maxX=parts[0];
-      if(parts[1]<minY)minY=parts[1]; if(parts[1]>maxY)maxY=parts[1];
-    }
+    const vals = m[2].split(',').map(s=>parseFloat(s.trim()));
+    if(vals.length>=2 && vals.every(isFinite)) pts[m[1]] = vals;
+  }
+  return pts;
+}
+
+function parseStepBoundingBoxApprox(text){
+  const pts = stepCartesianPoints(text);
+  // On ne garde que les points réellement utilisés comme sommets de la pièce (VERTEX_POINT) :
+  // les CARTESIAN_POINT bruts incluent aussi les origines de repères (AXIS2_PLACEMENT_3D) et les
+  // points de construction des courbes, qui faussent complètement la boîte englobante (souvent
+  // un point à l'origine (0,0,0) du repère global, très loin de la pièce elle-même).
+  const vertexRe = /VERTEX_POINT\s*\(\s*'[^']*'\s*,\s*#(\d+)\s*\)/g;
+  let m, minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity, found=0;
+  while((m = vertexRe.exec(text))){
+    const v = pts[m[1]];
+    if(!v) continue;
+    found++;
+    if(v[0]<minX)minX=v[0]; if(v[0]>maxX)maxX=v[0];
+    if(v[1]<minY)minY=v[1]; if(v[1]>maxY)maxY=v[1];
+  }
+  if(!found){
+    Object.values(pts).forEach(v=>{
+      if(v[0]<minX)minX=v[0]; if(v[0]>maxX)maxX=v[0];
+      if(v[1]<minY)minY=v[1]; if(v[1]>maxY)maxY=v[1];
+    });
   }
   if(!isFinite(minX)) throw new Error('Aucun point exploitable trouvé dans le fichier STEP.');
   return { longueur: Math.round(maxX-minX), largeur: Math.round(maxY-minY) };
@@ -2657,18 +2681,30 @@ function findAbaqueMatch(l, w, h){
   return { ref: best, volumeDemande: vol, prixUsinage: best.prixUsinage, prixMatiere: best.prixMatiere, nbHeureUsinage: best.prixUsinage/85 };
 }
 
-/* Lecture approximative d'un fichier STEP : boîte englobante 3D à partir des points CARTESIAN_POINT.
-   Comme pour l'imbrication, c'est une approximation (pas de vraie géométrie CAO) — à vérifier. */
+/* Lecture approximative d'un fichier STEP : boîte englobante 3D à partir des sommets réels de la
+   pièce (VERTEX_POINT). Comme pour l'imbrication, c'est une approximation (pas de vraie géométrie
+   CAO) — à vérifier. On exclut volontairement les CARTESIAN_POINT qui ne sont pas des sommets
+   (origines de repères, points de construction des courbes) : les inclure fait exploser la boîte
+   englobante, en général jusqu'à l'origine (0,0,0) du repère global de l'assemblage. */
 function parseStepBoundingBox3D(text){
-  const re = /CARTESIAN_POINT\s*\(\s*'[^']*'\s*,\s*\(([^)]+)\)/g;
-  let m, minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
-  while((m = re.exec(text))){
-    const parts = m[1].split(',').map(s=>parseFloat(s.trim()));
-    if(parts.length>=3 && parts.slice(0,3).every(isFinite)){
-      if(parts[0]<minX)minX=parts[0]; if(parts[0]>maxX)maxX=parts[0];
-      if(parts[1]<minY)minY=parts[1]; if(parts[1]>maxY)maxY=parts[1];
-      if(parts[2]<minZ)minZ=parts[2]; if(parts[2]>maxZ)maxZ=parts[2];
-    }
+  const pts = stepCartesianPoints(text);
+  const vertexRe = /VERTEX_POINT\s*\(\s*'[^']*'\s*,\s*#(\d+)\s*\)/g;
+  let m, minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity, found=0;
+  while((m = vertexRe.exec(text))){
+    const v = pts[m[1]];
+    if(!v || v.length<3) continue;
+    found++;
+    if(v[0]<minX)minX=v[0]; if(v[0]>maxX)maxX=v[0];
+    if(v[1]<minY)minY=v[1]; if(v[1]>maxY)maxY=v[1];
+    if(v[2]<minZ)minZ=v[2]; if(v[2]>maxZ)maxZ=v[2];
+  }
+  if(!found){
+    Object.values(pts).forEach(v=>{
+      if(v.length<3) return;
+      if(v[0]<minX)minX=v[0]; if(v[0]>maxX)maxX=v[0];
+      if(v[1]<minY)minY=v[1]; if(v[1]>maxY)maxY=v[1];
+      if(v[2]<minZ)minZ=v[2]; if(v[2]>maxZ)maxZ=v[2];
+    });
   }
   if(!isFinite(minX)) throw new Error('Aucun point exploitable trouvé dans le fichier STEP.');
   const longueur = Math.round(maxX-minX), largeur = Math.round(maxY-minY), hauteur = Math.round(maxZ-minZ);
