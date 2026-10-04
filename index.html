@@ -2328,6 +2328,7 @@ function defaultEmbPiece(){
     coutSousTraitance: 0,
     coutDivers: 0,
     margeAppliquee: 0.25,
+    pieceFileName: '',
     dateCreation: null, dateModification: null
   };
 }
@@ -2415,6 +2416,7 @@ const MATIERE_TABLE = [
 ];
 
 let embPieceEditing = null;
+let embPieceWireframe = null; // polylignes 3D du flanc chargé (fil de fer), non persisté
 
 function renderEmbPiece(){
   const view = document.getElementById('view');
@@ -2474,11 +2476,12 @@ function renderEmbPiece(){
 
   document.getElementById('emb-piece-new').onclick = ()=>{
     embPieceEditing = Object.assign(defaultEmbPiece(), { id: uid() });
+    embPieceWireframe = null;
     render();
   };
   embPieces.forEach(p=>{
     const editBtn = document.querySelector(`[data-emb-edit="${p.id}"]`);
-    if(editBtn) editBtn.onclick = ()=>{ embPieceEditing = JSON.parse(JSON.stringify(p)); render(); };
+    if(editBtn) editBtn.onclick = ()=>{ embPieceEditing = JSON.parse(JSON.stringify(p)); embPieceWireframe = null; render(); };
     const delBtn = document.querySelector(`[data-emb-del="${p.id}"]`);
     if(delBtn) delBtn.onclick = async ()=>{
       if(!confirm(`Supprimer la pièce « ${p.nom||'(sans nom)'} » ?`)) return;
@@ -2511,6 +2514,29 @@ function renderEmbPieceForm(){
 
     <div class="modal" style="max-width:720px;margin:0 0 24px;box-shadow:none;">
       <div class="field"><label>Désignation de la pièce</label><input type="text" id="ep-nom" value="${escapeHtml(p.nom)}" placeholder="Ex. FERM INF PIED AVT"></div>
+
+      <div class="field">
+        <label>Charger le flanc à plat depuis un fichier STEP</label>
+        <input type="file" id="ep-step-file" accept=".step,.stp">
+        ${p.pieceFileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(p.pieceFileName)}</span>` : ''}
+        <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Lecture approximative (boîte englobante à partir des points 3D du flanc développé) — longueur/largeur/épaisseur sont pré-remplies ci-dessous, vérifie-les et corrige-les si besoin.</span>
+      </div>
+
+      ${embPieceWireframe ? `
+        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Visualisation du flanc</h3>
+        <div style="overflow-x:auto;margin-bottom:8px;">
+          <div id="step-viewer-piece" class="dxf-viewer" style="width:100%;max-width:700px;height:420px;border:1px solid var(--line);border-radius:var(--radius);">
+            ${buildStepWireframeSvg(embPieceWireframe)}
+            <div class="dxf-viewer-controls">
+              <button data-zoom-in title="Zoomer">+</button>
+              <button data-zoom-out title="Dézoomer">−</button>
+              <button data-zoom-reset title="Réinitialiser">⤾</button>
+            </div>
+            <div class="dxf-viewer-hint">Molette / pincement = zoom · glisser = déplacer</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--ink-dim);margin:0 0 18px;">Visualisation filaire approximative reconstruite depuis le fichier STEP — pas un rendu solide, à vérifier.</div>
+      ` : ''}
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Données pièce</h3>
       <div class="grid3">
@@ -2629,6 +2655,25 @@ function renderEmbPieceForm(){
   document.getElementById('ep-nom').onchange = (e)=>{ p.nom = e.target.value; };
   document.getElementById('ep-marge').onchange = (e)=>{ p.margeAppliquee = parseFloat(e.target.value)||0; renderEmbPieceForm(); };
 
+  document.getElementById('ep-step-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    try{
+      const text = await file.text();
+      const bbox = parseStepBoundingBox3D(text);
+      p.longueurFlanc = bbox.longueur; p.largeurFlanc = bbox.largeur;
+      if(bbox.hauteur>0) p.epaisseur = bbox.hauteur;
+      p.pieceFileName = file.name;
+      if(!p.nom || !p.nom.trim()) p.nom = file.name.replace(/\.(stp|step)$/i, '');
+      try{ embPieceWireframe = parseStepWireframe(text); }catch(werr){ console.error(werr); embPieceWireframe = null; }
+      toast(`Flanc lu : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm`);
+      renderEmbPieceForm();
+    }catch(err){
+      console.error(err);
+      toast('Impossible de lire ce fichier : ' + err.message);
+    }
+  };
+
   document.getElementById('ep-save').onclick = async ()=>{
     if(!p.nom || !p.nom.trim()){ toast('Indique une désignation pour la pièce'); return; }
     if(!p.dateCreation) p.dateCreation = new Date().toISOString();
@@ -2637,9 +2682,12 @@ function renderEmbPieceForm(){
     await saveEmbPieces();
     toast('Pièce enregistrée');
     embPieceEditing = null;
+    embPieceWireframe = null;
     render();
   };
-  document.getElementById('ep-cancel').onclick = ()=>{ embPieceEditing = null; render(); };
+  document.getElementById('ep-cancel').onclick = ()=>{ embPieceEditing = null; embPieceWireframe = null; render(); };
+
+  if(embPieceWireframe){ attachDxfZoomPan('step-viewer-piece'); }
 }
 
 /* ---------------------------------------------------------
@@ -2656,6 +2704,8 @@ function defaultEmbOutil(){
     symetrieAxe: 'X',
     prixKgMatiere: 4,
     prixUsinageM3: null, // null = suit le prix moyen /m³ de l'abaque d'usinage, modifiable
+    matriceLOverride: null, matriceWOverride: null, matriceHOverride: null, // null = valeur calculée automatiquement, modifiable ensuite à la main
+    poinconLOverride: null, poinconWOverride: null, poinconHOverride: null,
     moRows: [
       { key:'programmation', label:'Programmation', enabled:true, hg:1, chg:60, hd:1, chd:60 },
       { key:'cao', label:'CAO', enabled:true, hg:8, chg:75, hd:8, chd:75 },
@@ -2857,8 +2907,15 @@ function computeOutil(o){
   const effLongueur = (isSym && symAxe==='X') ? (o.pieceLongueur*2 + 50) : o.pieceLongueur;
   const effLargeur = (isSym && symAxe==='Y') ? (o.pieceLargeur*2 + 50) : o.pieceLargeur;
 
-  const matriceL = effLongueur+160, matriceW = effLargeur+160, matriceH = o.pieceHauteur+50;
-  const poinconL = effLongueur, poinconW = effLargeur, poinconH = Math.max(o.pieceHauteur+50, 100);
+  // Dimensions calculées automatiquement — modifiables ensuite à la main (override), sinon elles suivent la formule.
+  const matriceLCalc = effLongueur+160, matriceWCalc = effLargeur+160, matriceHCalc = o.pieceHauteur+50;
+  const poinconLCalc = effLongueur, poinconWCalc = effLargeur, poinconHCalc = Math.max(o.pieceHauteur+50, 100);
+  const matriceL = o.matriceLOverride!=null ? o.matriceLOverride : matriceLCalc;
+  const matriceW = o.matriceWOverride!=null ? o.matriceWOverride : matriceWCalc;
+  const matriceH = o.matriceHOverride!=null ? o.matriceHOverride : matriceHCalc;
+  const poinconL = o.poinconLOverride!=null ? o.poinconLOverride : poinconLCalc;
+  const poinconW = o.poinconWOverride!=null ? o.poinconWOverride : poinconWCalc;
+  const poinconH = o.poinconHOverride!=null ? o.poinconHOverride : poinconHCalc;
   const hasSerreFlan = o.hasSerreFlan !== false;
   const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? 30 : 0;
 
@@ -2906,6 +2963,7 @@ function computeOutil(o){
   const totalMainG = sumG + matiereTotal;
   const totalMainD = sumD + matiereTotal;
   return { matriceL, matriceW, matriceH, poinconL, poinconW, poinconH, serreFlanL, serreFlanW, serreFlanH, hasSerreFlan,
+    matriceLCalc, matriceWCalc, matriceHCalc, poinconLCalc, poinconWCalc, poinconHCalc,
     isSym, symAxe, effLongueur, effLargeur,
     matriceVolume, matricePoids, matriceCoutMatiere,
     poinconVolume, poinconPoids, poinconCoutMatiere,
@@ -3072,6 +3130,15 @@ function renderEmbOutilForm(){
       <div style="font-size:12px;color:var(--ink-dim);">coût usinage (volume × prix moyen /m³)</div>
     </div>`;
 
+  // Cellule de dimension matrice/poinçon : pré-remplie avec la valeur calculée, modifiable à la main ;
+  // un bouton ⤾ apparaît une fois modifiée pour revenir au calcul automatique.
+  const dimCell = (overrideField, overrideVal, currentVal, calcVal) => `
+    <div style="display:flex;align-items:center;gap:4px;">
+      <input type="number" data-dim-field="${overrideField}" value="${currentVal}" style="width:85px;">
+      <span style="font-size:12px;color:var(--ink-dim);">mm</span>
+      ${overrideVal!=null ? `<button class="btn ghost" data-dim-reset="${overrideField}" title="Revenir au calcul automatique (${calcVal} mm)" style="padding:2px 6px;">⤾</button>` : ''}
+    </div>`;
+
   view.innerHTML = `
     <header class="page">
       <div>
@@ -3132,14 +3199,30 @@ function renderEmbOutilForm(){
         <div style="font-size:11px;color:var(--ink-dim);margin:0 0 18px;">Visualisation filaire approximative reconstruite depuis le fichier STEP (projection 2D sur les deux plus grandes dimensions) — pas un rendu solide, à vérifier.</div>
       ` : ''}
 
-      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (déduites)</h3>
+      <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Dimensions de l'outil (calculées — modifiables)</h3>
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:8px;">La matrice et le poinçon sont pré-remplis automatiquement à partir de la pièce ; corrige librement les valeurs si besoin, ou reviens au calcul automatique avec ⤾.</div>
       <div class="table-wrap">
         <table>
           <thead><tr><th></th><th>Matrice</th><th>Poinçon</th>${c.hasSerreFlan?'<th>Serre-flan</th>':''}</tr></thead>
           <tbody>
-            <tr><td>Longueur (pièce +160)</td><td>${c.matriceL} mm</td><td>${c.poinconL} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanL} mm</td>`:''}</tr>
-            <tr><td>Largeur (pièce +160)</td><td>${c.matriceW} mm</td><td>${c.poinconW} mm (= pièce)</td>${c.hasSerreFlan?`<td>${c.serreFlanW} mm</td>`:''}</tr>
-            <tr><td>Hauteur</td><td>${c.matriceH} mm (pièce +50)</td><td>${c.poinconH} mm (pièce +50, mini 100)</td>${c.hasSerreFlan?`<td>${c.serreFlanH} mm (fixe)</td>`:''}</tr>
+            <tr>
+              <td>Longueur</td>
+              <td>${dimCell('matriceLOverride', o.matriceLOverride, c.matriceL, c.matriceLCalc)}</td>
+              <td>${dimCell('poinconLOverride', o.poinconLOverride, c.poinconL, c.poinconLCalc)}</td>
+              ${c.hasSerreFlan?`<td>${c.serreFlanL} mm</td>`:''}
+            </tr>
+            <tr>
+              <td>Largeur</td>
+              <td>${dimCell('matriceWOverride', o.matriceWOverride, c.matriceW, c.matriceWCalc)}</td>
+              <td>${dimCell('poinconWOverride', o.poinconWOverride, c.poinconW, c.poinconWCalc)}</td>
+              ${c.hasSerreFlan?`<td>${c.serreFlanW} mm</td>`:''}
+            </tr>
+            <tr>
+              <td>Hauteur</td>
+              <td>${dimCell('matriceHOverride', o.matriceHOverride, c.matriceH, c.matriceHCalc)}</td>
+              <td>${dimCell('poinconHOverride', o.poinconHOverride, c.poinconH, c.poinconHCalc)}</td>
+              ${c.hasSerreFlan?`<td>${c.serreFlanH} mm (fixe)</td>`:''}
+            </tr>
           </tbody>
         </table>
       </div>
@@ -3207,6 +3290,21 @@ function renderEmbOutilForm(){
   document.querySelectorAll('[data-ofield]').forEach(inp=>{
     inp.onchange = (e)=>{
       o[e.target.dataset.ofield] = parseFloat(e.target.value) || 0;
+      // La pièce change : on repart des dimensions calculées pour la matrice/le poinçon.
+      o.matriceLOverride = o.matriceWOverride = o.matriceHOverride = null;
+      o.poinconLOverride = o.poinconWOverride = o.poinconHOverride = null;
+      renderEmbOutilForm();
+    };
+  });
+  document.querySelectorAll('[data-dim-field]').forEach(inp=>{
+    inp.onchange = (e)=>{
+      o[e.target.dataset.dimField] = parseFloat(e.target.value) || 0;
+      renderEmbOutilForm();
+    };
+  });
+  document.querySelectorAll('[data-dim-reset]').forEach(btn=>{
+    btn.onclick = ()=>{
+      o[btn.dataset.dimReset] = null;
       renderEmbOutilForm();
     };
   });
@@ -3214,9 +3312,19 @@ function renderEmbOutilForm(){
   document.getElementById('eo-has-serreflan').onchange = (e)=>{ o.hasSerreFlan = e.target.checked; renderEmbOutilForm(); };
   document.getElementById('eo-prix-kg').onchange = (e)=>{ o.prixKgMatiere = parseFloat(e.target.value) || 0; renderEmbOutilForm(); };
   document.getElementById('eo-prix-usinage-m3').onchange = (e)=>{ o.prixUsinageM3 = parseFloat(e.target.value) || 0; renderEmbOutilForm(); };
-  document.getElementById('eo-symetrique').onchange = (e)=>{ o.symetrique = e.target.checked; renderEmbOutilForm(); };
+  document.getElementById('eo-symetrique').onchange = (e)=>{
+    o.symetrique = e.target.checked;
+    o.matriceLOverride = o.matriceWOverride = o.matriceHOverride = null;
+    o.poinconLOverride = o.poinconWOverride = o.poinconHOverride = null;
+    renderEmbOutilForm();
+  };
   const symAxeSel = document.getElementById('eo-symetrie-axe');
-  if(symAxeSel) symAxeSel.onchange = (e)=>{ o.symetrieAxe = e.target.value; renderEmbOutilForm(); };
+  if(symAxeSel) symAxeSel.onchange = (e)=>{
+    o.symetrieAxe = e.target.value;
+    o.matriceLOverride = o.matriceWOverride = o.matriceHOverride = null;
+    o.poinconLOverride = o.poinconWOverride = o.poinconHOverride = null;
+    renderEmbOutilForm();
+  };
 
   document.querySelectorAll('[data-mo-field]').forEach(inp=>{
     inp.onchange = (e)=>{
@@ -3249,6 +3357,8 @@ function renderEmbOutilForm(){
       o.pieceLongueur = bbox.longueur; o.pieceLargeur = bbox.largeur; o.pieceHauteur = bbox.hauteur;
       o.pieceFileName = file.name;
       o.nom = file.name.replace(/\.(stp|step)$/i, '');
+      o.matriceLOverride = o.matriceWOverride = o.matriceHOverride = null;
+      o.poinconLOverride = o.poinconWOverride = o.poinconHOverride = null;
       try{ embOutilWireframe = parseStepWireframe(text); }catch(werr){ console.error(werr); embOutilWireframe = null; }
       toast(`Pièce lue : ${bbox.longueur} × ${bbox.largeur} × ${bbox.hauteur} mm (volume ≈ ${bbox.volume.toFixed(5)} m³)`);
       renderEmbOutilForm();
