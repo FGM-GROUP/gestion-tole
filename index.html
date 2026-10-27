@@ -335,16 +335,17 @@
     <div class="nav-group">
       <div class="nav-group-title">Laser — simulation &amp; imbrication</div>
       <button class="nav-btn" data-tab="decoupelaser"><span class="num">04</span> Découpe laser</button>
-      <button class="nav-btn" data-tab="imbrication"><span class="num">05</span> Imbrication</button>
+      <button class="nav-btn" data-tab="laserhist"><span class="num">05</span> Suivi des découpes</button>
+      <button class="nav-btn" data-tab="imbrication"><span class="num">06</span> Imbrication</button>
     </div>
     <div class="nav-group">
       <div class="nav-group-title">Emboutissage</div>
-      <button class="nav-btn" data-tab="embpiece"><span class="num">06</span> Pièce</button>
-      <button class="nav-btn" data-tab="taboutil"><span class="num">07</span> Outillage</button>
+      <button class="nav-btn" data-tab="embpiece"><span class="num">07</span> Pièce</button>
+      <button class="nav-btn" data-tab="taboutil"><span class="num">08</span> Outillage</button>
     </div>
     <div class="nav-group">
       <div class="nav-group-title">Réglages</div>
-      <button class="nav-btn" data-tab="parametres"><span class="num">08</span> Paramètres</button>
+      <button class="nav-btn" data-tab="parametres"><span class="num">09</span> Paramètres</button>
     </div>
   </nav>
   <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span>Connexion…</div>
@@ -372,8 +373,9 @@ let currentTab = 'inventaire';
    majeure = nouveau module / refonte, mineure = ajout ou correction dans un module existant.
    v3.0 Firebase · v3.1 palettes & paramètres · v3.2 imbrication DXF/STEP
    v4.0 Emboutissage (Pièce/Outillage) · v4.1 viewer STEP, symétrie, dimensions modifiables
-   v4.2 Pièce : données, détourage, matière, prise en charge · v4.3 Découpe laser : historique des temps réels */
-const APP_VERSION = '4.3';
+   v4.2 Pièce : données, détourage, matière, prise en charge · v4.3 Découpe laser : historique des temps réels
+   v4.4 Onglet Suivi des découpes : consultation, n° de commande, temps estimé/réel modifiables */
+const APP_VERSION = '4.4';
 const APP_VERSION_DATE = '27/10/2026';
 
 /* ---------------------------------------------------------
@@ -505,6 +507,7 @@ async function loadData(){
       laserHist = snap.docs.map(d=> Object.assign({}, d.data(), { _fbId: d.id }))
         .sort((a,b)=> String(b.date||'').localeCompare(String(a.date||'')));
       if(done>=TOTAL && currentTab === 'decoupelaser') renderDecoupeLaser();
+      else if(done>=TOTAL && currentTab === 'laserhist') renderLaserHist();
       checkDone();
     }, e=>{ console.error(e); laserHist = []; checkDone(); });
   });
@@ -513,6 +516,10 @@ async function loadData(){
 async function addLaserEntry(entry){
   try{ await db.collection('laserHistorique').add(entry); return true; }
   catch(e){ console.error(e); toast('Erreur d\'enregistrement Firebase — vérifiez la console'); return false; }
+}
+async function updateLaserEntry(fbId, fields){
+  try{ await db.collection('laserHistorique').doc(fbId).update(Object.assign({}, fields, { dateMaj: new Date().toISOString() })); return true; }
+  catch(e){ console.error(e); toast('Erreur de mise à jour Firebase — vérifiez la console'); return false; }
 }
 async function deleteLaserEntry(fbId){
   try{ await db.collection('laserHistorique').doc(fbId).delete(); }
@@ -621,6 +628,7 @@ function render(){
   else if(currentTab === 'parametres') renderParametres();
   else if(currentTab === 'imbrication') renderImbrication();
   else if(currentTab === 'decoupelaser') renderDecoupeLaser();
+  else if(currentTab === 'laserhist') renderLaserHist();
   else if(currentTab === 'embpiece') renderEmbPiece();
   else if(currentTab === 'taboutil') renderEmbOutil();
 }
@@ -1841,7 +1849,7 @@ function laserLearnedRatio(matiere, epaisseur){
 }
 
 function laserHistCsv(){
-  const cols = ['date','piece','fichier','matiere','epaisseur','vitesse','tempsPercage','longueurCoupeMm','percages','largeurMm','hauteurMm','qte','tempsEstimeMin','tempsReelMin'];
+  const cols = ['date','dateMaj','piece','commande','fichier','matiere','epaisseur','vitesse','tempsPercage','longueurCoupeMm','percages','largeurMm','hauteurMm','qte','tempsEstimeMin','tempsReelMin'];
   const esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
   return [cols.join(';')].concat(laserHist.map(h=>cols.map(c=>esc(h[c])).join(';'))).join('\n');
 }
@@ -1908,13 +1916,14 @@ function renderDecoupeLaser(){
           </div>` : `<div style="font-size:12px;color:var(--ink-dim);margin-top:12px;text-align:center;">Enregistre au moins 3 découpes réelles ci-dessous pour obtenir un temps corrigé.</div>`;
         })()}
 
-        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Enregistrer la découpe réelle</h3>
+        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Enregistrer dans le suivi des découpes</h3>
         <div class="grid3">
-          <div class="field"><label>Temps réel mesuré (min)</label><input type="number" step="0.1" min="0" id="laser-hist-reel"></div>
+          <div class="field"><label>Temps réel mesuré (min) — vide si pas encore découpé</label><input type="number" step="0.1" min="0" id="laser-hist-reel"></div>
           <div class="field"><label>Pièce / repère</label><input type="text" id="laser-hist-piece" value="${escapeHtml((laserFileName||'').replace(/\.dxf$/i,''))}"></div>
           <div class="field"><label>Quantité découpée</label><input type="number" min="1" id="laser-hist-qte" value="1"></div>
         </div>
-        <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="laser-hist-save">Ajouter à l'historique</button></div>
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="laser-hist-save">Enregistrer dans le suivi</button></div>
+        <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Tu peux enregistrer le temps estimé dès le devis, puis renseigner ou corriger le temps réel après la commande dans l'onglet « Suivi des découpes ».</div>
         <div style="overflow-x:auto;margin-top:16px;">
           <div id="dxf-viewer-laser" class="dxf-viewer" style="width:100%;max-width:600px;height:420px;border:1px solid var(--line);border-radius:var(--radius);">
             ${buildDxfSvg(laserResult.entities, laserResult.bbox)}
@@ -1929,25 +1938,8 @@ function renderDecoupeLaser(){
       </div>
     ` : `<div class="empty" style="padding:36px 24px;"><b>Aucun fichier chargé</b>Charge un DXF pour voir l'estimation du temps de découpe.</div>`}
 
-    <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:28px 0 8px;color:var(--ink-dim);">Historique des découpes réelles (${laserHist.length})</h3>
-    <div style="font-size:12px;color:var(--ink-dim);margin-bottom:10px;max-width:640px;">Chaque découpe enregistrée constitue la base d'apprentissage pour prédire temps et prix. Avec quelques dizaines de cas, une correction simple (rapport réel/estimé) suffit ; un modèle plus poussé (deep learning) ne devient utile qu'avec plusieurs centaines de découpes — exporte le CSV pour l'entraîner hors de l'application.</div>
-    ${laserHist.length ? `
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Date</th><th>Pièce</th><th>Matière</th><th>Ép.</th><th>Coupe (m)</th><th>Perçages</th><th>Estimé</th><th>Réel</th><th>Réel/estimé</th><th></th></tr></thead>
-          <tbody>
-            ${laserHist.slice(0,50).map(h=>`<tr>
-              <td>${formatDate(h.date)}</td><td>${escapeHtml(h.piece||h.fichier||'')}</td><td>${escapeHtml(h.matiere||'')}</td><td>${h.epaisseur} mm</td>
-              <td>${(h.longueurCoupeMm/1000).toFixed(2)}</td><td>${h.percages}</td>
-              <td>${Number(h.tempsEstimeMin).toFixed(1)} min</td><td>${Number(h.tempsReelMin).toFixed(1)} min</td>
-              <td>${h.tempsEstimeMin>0 ? '×'+(h.tempsReelMin/h.tempsEstimeMin).toFixed(2) : '—'}</td>
-              <td class="row-actions"><button class="btn small danger" data-laser-del="${h._fbId}">Suppr.</button></td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start;"><button class="btn small" id="laser-hist-csv">Exporter en CSV</button></div>
-    ` : `<div class="empty" style="padding:24px;max-width:640px;"><b>Historique vide</b>Charge un DXF, découpe la pièce, puis saisis le temps réel pour commencer à constituer la base.</div>`}
+    <div style="margin-top:24px;font-size:13px;color:var(--ink-dim);">${laserHist.length} découpe${laserHist.length>1?'s':''} enregistrée${laserHist.length>1?'s':''} ·
+      <button class="btn small" id="laser-open-suivi">Ouvrir le suivi des découpes</button></div>
   `;
 
   document.getElementById('laser-matiere').onchange = (e)=>{
@@ -1969,8 +1961,8 @@ function renderDecoupeLaser(){
 
   const histSave = document.getElementById('laser-hist-save');
   if(histSave) histSave.onclick = async ()=>{
-    const reel = parseFloat(document.getElementById('laser-hist-reel').value);
-    if(!(reel>0)){ toast('Saisis le temps réel mesuré (en minutes)'); return; }
+    const reelRaw = parseFloat(document.getElementById('laser-hist-reel').value);
+    const reel = reelRaw>0 ? reelRaw : null; // facultatif : peut être renseigné plus tard dans le suivi
     const qte = Math.max(1, parseInt(document.getElementById('laser-hist-qte').value)||1);
     const ok = await addLaserEntry({
       date: new Date().toISOString(),
@@ -1982,20 +1974,13 @@ function renderDecoupeLaser(){
       largeurMm: Math.round(laserResult.bbox.maxX-laserResult.bbox.minX), hauteurMm: Math.round(laserResult.bbox.maxY-laserResult.bbox.minY),
       qte,
       // temps rapportés à une seule pièce pour que les données restent comparables
-      tempsEstimeMin: +(calc.tempsTotalMin).toFixed(3), tempsReelMin: +(reel/qte).toFixed(3)
+      commande: '',
+      tempsEstimeMin: +(calc.tempsTotalMin).toFixed(3), tempsReelMin: reel ? +(reel/qte).toFixed(3) : null
     });
-    if(ok) toast('Découpe ajoutée à l\'historique');
+    if(ok) toast(reel ? 'Découpe enregistrée dans le suivi' : 'Devis enregistré — temps réel à renseigner dans le suivi');
   };
-  document.querySelectorAll('[data-laser-del]').forEach(b=>{
-    b.onclick = async ()=>{ if(confirm('Supprimer cette découpe de l\'historique ?')) await deleteLaserEntry(b.dataset.laserDel); };
-  });
-  const csvBtn = document.getElementById('laser-hist-csv');
-  if(csvBtn) csvBtn.onclick = ()=>{
-    const blob = new Blob(['\ufeff'+laserHistCsv()], { type:'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = 'historique-decoupe-laser.csv'; a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
-  };
+  const openSuivi = document.getElementById('laser-open-suivi');
+  if(openSuivi) openSuivi.onclick = ()=> document.querySelector('[data-tab="laserhist"]').click();
 
   document.getElementById('laser-file').onchange = async (e)=>{
     const file = e.target.files[0];
@@ -2011,6 +1996,119 @@ function renderDecoupeLaser(){
       toast('Impossible de lire ce fichier : ' + err.message);
     }
   };
+}
+
+/* ---------------------------------------------------------
+   SUIVI DES DÉCOUPES LASER — consulter, compléter après commande, corriger les temps
+--------------------------------------------------------- */
+let laserHistFilter = { q: '', statut: '' };
+
+function renderLaserHist(){
+  const view = document.getElementById('view');
+  const q = laserHistFilter.q.trim().toLowerCase();
+  const rows = laserHist.filter(h=>{
+    const hasReel = h.tempsReelMin>0;
+    if(laserHistFilter.statut==='attente' && hasReel) return false;
+    if(laserHistFilter.statut==='reel' && !hasReel) return false;
+    if(!q) return true;
+    return [h.piece,h.fichier,h.commande,h.matiere].some(v=> String(v||'').toLowerCase().includes(q));
+  });
+  const nbReel = laserHist.filter(h=>h.tempsReelMin>0).length;
+  const withRatio = laserHist.filter(h=>h.tempsReelMin>0 && h.tempsEstimeMin>0);
+  const ratioMoy = withRatio.length ? withRatio.reduce((sum,h)=>sum+h.tempsReelMin/h.tempsEstimeMin,0)/withRatio.length : null;
+  const num = v => (v==null || v==='') ? '' : (Math.round(v*100)/100);
+
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Laser — simulation &amp; imbrication</div>
+        <h1>Suivi des découpes</h1>
+        <div class="lede">Retrouve les découpes enregistrées depuis l'onglet Découpe laser, renseigne le numéro de commande et corrige les temps (estimé ou réel) une fois la pièce découpée.</div>
+      </div>
+    </header>
+
+    <div class="grid3" style="max-width:720px;margin-bottom:16px;">
+      <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${laserHist.length}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">découpes enregistrées</div></div>
+      <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${laserHist.length-nbReel}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">en attente du temps réel</div></div>
+      <div class="result-card"><div style="font-family:var(--display);font-size:22px;">${ratioMoy!=null ? '×'+ratioMoy.toFixed(2) : '—'}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">rapport réel / estimé moyen</div></div>
+    </div>
+
+    <div class="grid3" style="max-width:720px;align-items:end;">
+      <div class="field"><label>Rechercher (pièce, commande, matière)</label><input type="text" id="lh-q" value="${escapeHtml(laserHistFilter.q)}"></div>
+      <div class="field"><label>Statut</label>
+        <select id="lh-statut">
+          <option value="" ${laserHistFilter.statut===''?'selected':''}>Toutes</option>
+          <option value="attente" ${laserHistFilter.statut==='attente'?'selected':''}>En attente du temps réel</option>
+          <option value="reel" ${laserHistFilter.statut==='reel'?'selected':''}>Temps réel renseigné</option>
+        </select>
+      </div>
+      <div class="field"><button class="btn" id="lh-csv" ${laserHist.length?'':'disabled'}>Exporter en CSV</button></div>
+    </div>
+
+    ${rows.length ? `
+      <div class="table-wrap">
+        <table style="min-width:1000px;">
+          <thead><tr><th>Date</th><th>Pièce</th><th>N° commande</th><th>Matière</th><th>Qté</th><th>Estimé (lot, min)</th><th>Réel (lot, min)</th><th>Réel/estimé</th><th>Statut</th><th></th></tr></thead>
+          <tbody>
+            ${rows.map(h=>{
+              const qte = h.qte>0 ? h.qte : 1;
+              const hasReel = h.tempsReelMin>0;
+              return `<tr>
+                <td>${formatDate(h.date)}</td>
+                <td><input type="text" data-lh="${h._fbId}" data-f="piece" value="${escapeHtml(h.piece||h.fichier||'')}" style="width:160px;"></td>
+                <td><input type="text" data-lh="${h._fbId}" data-f="commande" value="${escapeHtml(h.commande||'')}" placeholder="—" style="width:110px;"></td>
+                <td>${escapeHtml(h.matiere||'')} ${h.epaisseur} mm</td>
+                <td><input type="number" min="1" data-lh="${h._fbId}" data-f="qte" value="${qte}" style="width:60px;"></td>
+                <td><input type="number" step="0.1" min="0" data-lh="${h._fbId}" data-f="estime" value="${num(h.tempsEstimeMin*qte)}" style="width:80px;"></td>
+                <td><input type="number" step="0.1" min="0" data-lh="${h._fbId}" data-f="reel" value="${hasReel ? num(h.tempsReelMin*qte) : ''}" placeholder="à saisir" style="width:80px;"></td>
+                <td>${hasReel && h.tempsEstimeMin>0 ? '×'+(h.tempsReelMin/h.tempsEstimeMin).toFixed(2) : '—'}</td>
+                <td>${hasReel ? '<span style="color:var(--accent);">Réel saisi</span>' : '<span style="color:var(--ink-dim);">En attente</span>'}</td>
+                <td class="row-actions"><button class="btn small danger" data-lh-del="${h._fbId}">Suppr.</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div style="font-size:12px;color:var(--ink-dim);margin-top:8px;max-width:720px;">Les temps sont affichés pour le lot (quantité × temps par pièce) ; chaque modification est enregistrée dès que tu quittes la case. Seules les découpes avec un temps réel servent à corriger les estimations de l'onglet Découpe laser.</div>
+    ` : `<div class="empty" style="padding:36px 24px;margin-top:16px;"><b>${laserHist.length ? 'Aucun résultat' : 'Aucune découpe enregistrée'}</b>${laserHist.length ? 'Modifie la recherche ou le statut.' : 'Dans l\'onglet Découpe laser, charge un DXF puis clique sur « Enregistrer dans le suivi ».'}</div>`}
+  `;
+
+  const qInput = document.getElementById('lh-q');
+  qInput.oninput = (e)=>{
+    laserHistFilter.q = e.target.value;
+    const pos = e.target.selectionStart;
+    renderLaserHist();
+    const again = document.getElementById('lh-q');
+    again.focus(); again.setSelectionRange(pos, pos);
+  };
+  document.getElementById('lh-statut').onchange = (e)=>{ laserHistFilter.statut = e.target.value; renderLaserHist(); };
+  document.getElementById('lh-csv').onclick = ()=>{
+    const blob = new Blob(['﻿'+laserHistCsv()], { type:'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'suivi-decoupes-laser.csv'; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+  };
+
+  document.querySelectorAll('[data-lh]').forEach(inp=>{
+    inp.onchange = async (e)=>{
+      const id = e.target.dataset.lh, f = e.target.dataset.f;
+      const h = laserHist.find(x=>x._fbId===id); if(!h) return;
+      const qte = h.qte>0 ? h.qte : 1;
+      const v = e.target.value;
+      let fields = {};
+      if(f==='piece' || f==='commande') fields[f] = v.trim();
+      else if(f==='qte'){
+        const nq = Math.max(1, parseInt(v)||1);
+        fields.qte = nq; // les temps par pièce restent identiques, le lot se recalcule
+      }
+      else if(f==='estime'){ const n = parseFloat(v); if(!(n>=0)){ renderLaserHist(); return; } fields.tempsEstimeMin = +(n/qte).toFixed(3); }
+      else if(f==='reel'){ const n = parseFloat(v); fields.tempsReelMin = n>0 ? +(n/qte).toFixed(3) : null; }
+      if(await updateLaserEntry(id, fields)) toast('Mis à jour');
+    };
+  });
+  document.querySelectorAll('[data-lh-del]').forEach(b=>{
+    b.onclick = async ()=>{ if(confirm('Supprimer cette découpe du suivi ?')) await deleteLaserEntry(b.dataset.lhDel); };
+  });
 }
 
 function renderScanner(){
