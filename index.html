@@ -256,6 +256,7 @@
 
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -2px;}
   .table-wrap table{min-width:640px;}
+  #main-view .table-wrap{width:100%;}
 
   @media (max-width:820px){
     #ruler{display:none;}
@@ -375,8 +376,9 @@ let currentTab = 'inventaire';
    v4.0 Emboutissage (Pièce/Outillage) · v4.1 viewer STEP, symétrie, dimensions modifiables
    v4.2 Pièce : données, détourage, matière, prise en charge · v4.3 Découpe laser : historique des temps réels
    v4.4 Onglet Suivi des découpes : consultation, n° de commande, temps estimé/réel modifiables
-   v4.5 Confirmation de suppression intégrée (tôles, zones, pièces, outils, découpes), suppression de tôle corrigée */
-const APP_VERSION = '4.5';
+   v4.5 Confirmation de suppression intégrée (tôles, zones, pièces, outils, découpes), suppression de tôle corrigée
+   v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette */
+const APP_VERSION = '4.6';
 const APP_VERSION_DATE = '27/10/2026';
 
 /* ---------------------------------------------------------
@@ -657,7 +659,14 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
   });
 });
 
+/* L'inventaire occupe toute la largeur de l'écran ; les autres onglets gardent leur largeur de lecture. */
+function applyMainWidth(){
+  const m = document.getElementById('main-view');
+  if(m) m.style.maxWidth = (currentTab === 'inventaire') ? 'none' : '';
+}
+
 function render(){
+  applyMainWidth();
   if(currentTab === 'inventaire') renderInventaire();
   else if(currentTab === 'zones') renderZones();
   else if(currentTab === 'scanner') renderScanner();
@@ -672,6 +681,7 @@ function render(){
 /* Utilisée par les écouteurs temps réel : on évite de redessiner l'onglet Scanner
    (couperait la caméra en plein scan) et l'onglet Imbrication (perdrait la saisie en cours). */
 function renderLiveSafe(){
+  applyMainWidth();
   if(currentTab === 'inventaire') renderInventaire();
   else if(currentTab === 'zones') renderZones();
   else if(currentTab === 'parametres') renderParametres();
@@ -689,6 +699,7 @@ let invSecteurFilter = '';
 
 function renderInventaire(){
   const view = document.getElementById('view');
+  const mainEl = document.getElementById('main-view'); if(mainEl) mainEl.style.maxWidth = 'none';
   const filtered = toles.filter(t=>{
     const matchSearch = !invSearch || (t.ref+t.matiere+(t.nuance||'')+(t.palette||'')).toLowerCase().includes(invSearch.toLowerCase());
     const matchZone = !invZoneFilter || t.zone === invZoneFilter;
@@ -697,6 +708,13 @@ function renderInventaire(){
     const matchPalette = !invPaletteFilter || (t.palette||'') === invPaletteFilter;
     const matchSecteur = !invSecteurFilter || (t.secteur||'Autre') === invSecteurFilter;
     return matchSearch && matchZone && matchNuance && matchEp && matchPalette && matchSecteur;
+  });
+  // Tri automatique par n° de palette croissant (tôles sans palette en fin de liste), puis par référence.
+  const palNum = t => { const n = parseInt(t.palette, 10); return isNaN(n) ? Infinity : n; };
+  filtered.sort((a,b)=>{
+    const pa = palNum(a), pb = palNum(b);
+    if(pa !== pb) return pa < pb ? -1 : 1;
+    return String(a.ref||'').localeCompare(String(b.ref||''), 'fr', { numeric:true });
   });
   const nuancesDispo = [...new Set(toles.map(t=>t.nuance).filter(Boolean))].sort();
   const epaisseursDispo = [...new Set(toles.map(t=>t.epaisseur))].sort((a,b)=>a-b);
