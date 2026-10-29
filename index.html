@@ -367,7 +367,29 @@ let toles = [];
 let zones = [];
 let embPieces = [];
 let embOutils = [];
-let settings = { paletteStart: 1, defaultLongueur: 1000, defaultLargeur: 1000, defaultEpaisseur: 1, defaultMatiere: 'Acier', defaultSeuil: 1 };
+/* Matières — prix au kilo et densité centralisés (onglet Paramètres), utilisés par Pièce, Outillage et le devis de découpe laser.
+   densite en kg/dm³ ; outillage:true = matière d'outillage (exclue des listes de matières à découper). */
+const DEFAULT_MATIERES = [
+  { nom:'Acier', densite:8, prixKg:3 },
+  { nom:'Alu', densite:2.7, prixKg:5 },
+  { nom:'Inox', densite:8, prixKg:6 },
+  { nom:'42CMD8', densite:7.85, prixKg:4, outillage:true },
+];
+let settings = { paletteStart: 1, defaultLongueur: 1000, defaultLargeur: 1000, defaultEpaisseur: 1, defaultMatiere: 'Acier', defaultSeuil: 1,
+  matieres: DEFAULT_MATIERES.map(m=>Object.assign({}, m)) };
+
+function getMatieres(){
+  return (settings.matieres && settings.matieres.length) ? settings.matieres : DEFAULT_MATIERES;
+}
+/* Cherche une matière par nom (insensible à la casse ; « Aluminium » = « Alu »), sinon la première matière à découper. */
+function getMatiere(nom){
+  const list = getMatieres();
+  const n = String(nom||'').trim().toLowerCase();
+  const key = n === 'aluminium' ? 'alu' : n;
+  return list.find(m=> String(m.nom).trim().toLowerCase() === key)
+      || list.find(m=> !m.outillage)
+      || DEFAULT_MATIERES[0];
+}
 let currentTab = 'inventaire';
 
 /* Version affichée dans l'application (majeure.mineure) — à incrémenter à chaque livraison :
@@ -377,8 +399,10 @@ let currentTab = 'inventaire';
    v4.2 Pièce : données, détourage, matière, prise en charge · v4.3 Découpe laser : historique des temps réels
    v4.4 Onglet Suivi des découpes : consultation, n° de commande, temps estimé/réel modifiables
    v4.5 Confirmation de suppression intégrée (tôles, zones, pièces, outils, découpes), suppression de tôle corrigée
-   v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette */
-const APP_VERSION = '4.6';
+   v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
+   v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
+   v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser) */
+const APP_VERSION = '4.8';
 const APP_VERSION_DATE = '27/10/2026';
 
 /* ---------------------------------------------------------
@@ -486,6 +510,9 @@ async function loadData(){
           defaultEpaisseur: Number(d.defaultEpaisseur) || 1,
           defaultMatiere: d.defaultMatiere || 'Acier',
           defaultSeuil: Number(d.defaultSeuil) || 1,
+          matieres: (Array.isArray(d.matieres) && d.matieres.length)
+            ? d.matieres.map(m=>({ nom: String(m.nom||''), densite: Number(m.densite)||0, prixKg: Number(m.prixKg)||0, outillage: !!m.outillage }))
+            : DEFAULT_MATIERES.map(m=>Object.assign({}, m)),
         };
       }
       if(done>=TOTAL) renderLiveSafe();
@@ -655,6 +682,7 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
     btn.classList.add('active');
     stopLiveScanner();
     currentTab = btn.dataset.tab;
+    matieresDraft = null; // abandonne les modifications non enregistrées du tableau des matières
     render();
   });
 });
@@ -1317,8 +1345,11 @@ function printToleTag(t){
 let scanResultZone = null;
 let scanNotFoundCode = null;
 
+let matieresDraft = null; // copie de travail du tableau des matières (modifiée avant enregistrement)
+
 function renderParametres(){
   const view = document.getElementById('view');
+  if(!matieresDraft) matieresDraft = getMatieres().map(m=>Object.assign({}, m));
   view.innerHTML = `
     <header class="page">
       <div>
@@ -1351,7 +1382,52 @@ function renderParametres(){
         <button class="btn primary" id="save-settings">Enregistrer les paramètres</button>
       </div>
     </div>
+
+    <div class="modal" style="max-width:640px;margin:24px 0 0;box-shadow:none;">
+      <h3 style="font-family:var(--display);font-size:15px;margin:0 0 6px;">Matières — prix au kilo</h3>
+      <div style="font-size:12px;color:var(--ink-dim);margin-bottom:12px;">Ces prix et densités sont utilisés partout : onglet Pièce, Outillage (matière d'outillage 42CMD8) et devis de découpe laser. Ils restent modifiables au cas par cas dans chaque calcul.</div>
+      <div class="table-wrap">
+        <table style="min-width:520px;">
+          <thead><tr><th>Matière</th><th>Densité (kg/dm³)</th><th>Prix (€/kg)</th><th>Outillage</th><th></th></tr></thead>
+          <tbody>
+            ${matieresDraft.map((m,i)=>`<tr>
+              <td><input type="text" data-mat="${i}" data-f="nom" value="${escapeHtml(m.nom)}" style="width:150px;"></td>
+              <td><input type="number" step="0.01" min="0" data-mat="${i}" data-f="densite" value="${m.densite}" style="width:90px;"></td>
+              <td><input type="number" step="0.01" min="0" data-mat="${i}" data-f="prixKg" value="${m.prixKg}" style="width:90px;"></td>
+              <td><input type="checkbox" data-mat="${i}" data-f="outillage" ${m.outillage?'checked':''} style="width:auto;" title="Matière d'outillage : exclue des choix de matière de la pièce"></td>
+              <td><button class="btn ghost" data-mat-del="${i}" title="Supprimer la matière">✕</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;">
+        <button class="btn small" id="mat-add">+ Ajouter une matière</button>
+        <button class="btn primary" id="mat-save">Enregistrer les matières</button>
+      </div>
+    </div>
   `;
+
+  document.querySelectorAll('[data-mat]').forEach(inp=>{
+    inp.onchange = (e)=>{
+      const i = parseInt(e.target.dataset.mat), f = e.target.dataset.f;
+      if(f==='nom') matieresDraft[i].nom = e.target.value.trim();
+      else if(f==='outillage') matieresDraft[i].outillage = e.target.checked;
+      else matieresDraft[i][f] = parseFloat(e.target.value) || 0;
+    };
+  });
+  document.querySelectorAll('[data-mat-del]').forEach(b=>{
+    b.onclick = ()=>{ matieresDraft.splice(parseInt(b.dataset.matDel),1); renderParametres(); };
+  });
+  document.getElementById('mat-add').onclick = ()=>{ matieresDraft.push({ nom:'', densite:7.85, prixKg:0, outillage:false }); renderParametres(); };
+  document.getElementById('mat-save').onclick = async ()=>{
+    const clean = matieresDraft.filter(m=>m.nom);
+    if(!clean.some(m=>!m.outillage)){ toast('Garde au moins une matière à découper (non outillage)'); return; }
+    settings.matieres = clean.map(m=>({ nom:m.nom, densite:m.densite, prixKg:m.prixKg, outillage:!!m.outillage }));
+    matieresDraft = null;
+    await saveSettings();
+    toast('Matières enregistrées');
+    renderParametres();
+  };
 
   document.getElementById('save-settings').onclick = async ()=>{
     settings.paletteStart = Math.max(1, parseInt(document.getElementById('s-palette-start').value) || 1);
@@ -1360,7 +1436,7 @@ function renderParametres(){
     settings.defaultEpaisseur = parseFloat(document.getElementById('s-def-ep').value) || 0;
     settings.defaultSeuil = parseInt(document.getElementById('s-def-seuil').value) || 0;
     settings.defaultMatiere = document.getElementById('s-def-matiere').value;
-    await saveSettings();
+    await saveSettings(); // (settings.matieres est conservé tel qu'enregistré)
     toast('Paramètres enregistrés');
   };
 }
@@ -1916,6 +1992,49 @@ function laserHistCsv(){
   return [cols.join(';')].concat(laserHist.map(h=>cols.map(c=>esc(h[c])).join(';'))).join('\n');
 }
 
+/* ---------------------------------------------------------
+   DEVIS DÉCOUPE LASER — programme, prise en charge, matière, découpe, quantité ; export CSV
+   (valeurs par défaut modifiables ; format CSV à adapter pour l'import Clipper)
+--------------------------------------------------------- */
+let laserDevis = { reference:'', client:'', qte:1, prixKgMatiere:null, programmeEur:30, priseEnChargeEur:0, tauxLaser:115, marge:0.25 };
+
+function laserDevisCompute(calc){
+  const d = laserDevis;
+  const qte = Math.max(1, parseInt(d.qte)||1);
+  const bb = laserResult.bbox;
+  const largeur = Math.max(0, bb.maxX-bb.minX), hauteur = Math.max(0, bb.maxY-bb.minY);
+  const mat = getMatiere(laserParams.matiere);
+  const poidsUnit = largeur*hauteur*laserParams.epaisseur/1e6*mat.densite; // kg, rectangle englobant
+  const prixKg = d.prixKgMatiere!=null ? d.prixKgMatiere : mat.prixKg;
+  const matiereUnit = poidsUnit*prixKg;
+  const L = laserLearnedRatio(laserParams.matiere, laserParams.epaisseur);
+  const tempsUnitMin = calc.tempsTotalMin * (L ? L.ratio : 1);
+  const laserUnit = tempsUnitMin/60 * (d.tauxLaser||0);
+  const lignes = [
+    { code:'PROG', libelle:'Programme', qte:1, pu:d.programmeEur||0 },
+    { code:'PEC', libelle:'Prise en charge', qte:1, pu:d.priseEnChargeEur||0 },
+    { code:'MAT', libelle:`Matière ${laserParams.matiere} ép. ${laserParams.epaisseur} mm`, qte, pu:matiereUnit },
+    { code:'LASER', libelle:'Découpe laser', qte, pu:laserUnit },
+  ];
+  lignes.forEach(l=> l.total = l.qte*l.pu);
+  const sousTotal = lignes.reduce((sum,l)=>sum+l.total,0);
+  const margeEur = sousTotal*(d.marge||0);
+  const totalHt = sousTotal + margeEur;
+  return { qte, largeur, hauteur, poidsUnit, prixKg, tempsUnitMin, corrige: !!L, lignes, sousTotal, margeEur, totalHt, prixPiece: totalHt/qte };
+}
+
+function laserDevisCsv(dv){
+  const fr = n => (Math.round(n*100)/100).toFixed(2).replace('.',',');
+  const esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const date = new Date().toLocaleDateString('fr-FR');
+  const cols = ['Date','Référence','Client','Matière','Épaisseur (mm)','Ligne','Libellé','Quantité','Prix unitaire HT','Total HT'];
+  const base = [date, laserDevis.reference, laserDevis.client, laserParams.matiere, laserParams.epaisseur];
+  const rows = dv.lignes.map(l=> base.concat([l.code, l.libelle, l.qte, fr(l.pu), fr(l.total)]));
+  rows.push(base.concat(['MARGE', `Marge ${Math.round((laserDevis.marge||0)*100)} %`, 1, fr(dv.margeEur), fr(dv.margeEur)]));
+  rows.push(base.concat(['TOTAL', 'Total devis HT', 1, fr(dv.totalHt), fr(dv.totalHt)]));
+  return [cols.map(esc).join(';')].concat(rows.map(r=>r.map(esc).join(';'))).join('\r\n');
+}
+
 function renderDecoupeLaser(){
   const view = document.getElementById('view');
   const calc = laserCompute();
@@ -1978,11 +2097,43 @@ function renderDecoupeLaser(){
           </div>` : `<div style="font-size:12px;color:var(--ink-dim);margin-top:12px;text-align:center;">Enregistre au moins 3 découpes réelles ci-dessous pour obtenir un temps corrigé.</div>`;
         })()}
 
-        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Enregistrer dans le suivi des découpes</h3>
+        ${(()=>{
+          const dv = laserDevisCompute(calc);
+          const eur = n => n.toFixed(2).replace('.',',')+' €';
+          return `
+        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:26px 0 10px;color:var(--ink-dim);">Devis</h3>
         <div class="grid3">
-          <div class="field"><label>Temps réel mesuré (min) — vide si pas encore découpé</label><input type="number" step="0.1" min="0" id="laser-hist-reel"></div>
-          <div class="field"><label>Pièce / repère</label><input type="text" id="laser-hist-piece" value="${escapeHtml((laserFileName||'').replace(/\.dxf$/i,''))}"></div>
-          <div class="field"><label>Quantité découpée</label><input type="number" min="1" id="laser-hist-qte" value="1"></div>
+          <div class="field"><label>Référence pièce</label><input type="text" id="ld-ref" value="${escapeHtml(laserDevis.reference)}"></div>
+          <div class="field"><label>Client</label><input type="text" id="ld-client" value="${escapeHtml(laserDevis.client)}"></div>
+          <div class="field"><label>Quantité</label><input type="number" min="1" id="ld-qte" value="${dv.qte}"></div>
+        </div>
+        <div class="grid3">
+          <div class="field"><label>Programme (forfait €)</label><input type="number" step="0.01" min="0" id="ld-prog" value="${laserDevis.programmeEur}"></div>
+          <div class="field"><label>Prise en charge (forfait €)</label><input type="number" step="0.01" min="0" id="ld-pec" value="${laserDevis.priseEnChargeEur}"></div>
+          <div class="field"><label>Prix matière (€/kg) — Paramètres</label><input type="number" step="0.1" min="0" id="ld-prixkg" value="${dv.prixKg}"></div>
+        </div>
+        <div class="grid3">
+          <div class="field"><label>Taux machine laser (€/h)</label><input type="number" step="1" min="0" id="ld-taux" value="${laserDevis.tauxLaser}"></div>
+          <div class="field"><label>Marge (%)</label><input type="number" step="1" min="0" id="ld-marge" value="${Math.round((laserDevis.marge||0)*100)}"></div>
+        </div>
+        <div class="table-wrap">
+          <table style="min-width:420px;">
+            <thead><tr><th>Ligne</th><th>Quantité</th><th>Prix unitaire HT</th><th>Total HT</th></tr></thead>
+            <tbody>
+              ${dv.lignes.map(l=>`<tr><td>${escapeHtml(l.libelle)}</td><td>${l.qte}</td><td>${eur(l.pu)}</td><td>${eur(l.total)}</td></tr>`).join('')}
+              <tr><td>Marge ${Math.round((laserDevis.marge||0)*100)} %</td><td>1</td><td>${eur(dv.margeEur)}</td><td>${eur(dv.margeEur)}</td></tr>
+              <tr style="font-weight:600;"><td colspan="3">Total devis HT</td><td>${eur(dv.totalHt)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 12px;">Soit <b style="color:var(--ink);">${eur(dv.prixPiece)}</b> la pièce (frais fixes répartis sur ${dv.qte}). Matière calculée sur le rectangle englobant ${Math.round(dv.largeur)}×${Math.round(dv.hauteur)} mm (${dv.poidsUnit.toFixed(3)} kg/pièce) ; temps de découpe ${dv.tempsUnitMin.toFixed(2)} min/pièce${dv.corrige?' (corrigé d\'après ton historique)':' (estimation)'}. Les montants par défaut sont modifiables.</div>
+        <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="ld-csv">Exporter le devis en CSV</button></div>`;
+        })()}
+
+        <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Enregistrer dans le suivi des découpes</h3>
+        <div class="grid2">
+          <div class="field"><label>Temps réel mesuré pour le lot (min) — vide si pas encore découpé</label><input type="number" step="0.1" min="0" id="laser-hist-reel"></div>
+          <div class="field"><label>Pièce / repère</label><input type="text" id="laser-hist-piece" value="${escapeHtml(laserDevis.reference || (laserFileName||'').replace(/\.dxf$/i,''))}"></div>
         </div>
         <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="laser-hist-save">Enregistrer dans le suivi</button></div>
         <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Tu peux enregistrer le temps estimé dès le devis, puis renseigner ou corriger le temps réel après la commande dans l'onglet « Suivi des découpes ».</div>
@@ -2006,6 +2157,7 @@ function renderDecoupeLaser(){
 
   document.getElementById('laser-matiere').onchange = (e)=>{
     laserParams.matiere = e.target.value;
+    laserDevis.prixKgMatiere = null; // reprend le prix par défaut de la nouvelle matière
     const epaisseurs = Object.keys(LASER_PRESETS[laserParams.matiere]).map(Number);
     if(!epaisseurs.includes(laserParams.epaisseur)) laserParams.epaisseur = epaisseurs[0];
     laserParams.vitesse = LASER_PRESETS[laserParams.matiere][laserParams.epaisseur];
@@ -2021,11 +2173,32 @@ function renderDecoupeLaser(){
 
   if(laserResult){ attachDxfZoomPan('dxf-viewer-laser'); }
 
+  if(laserResult){
+    const bind = (id, fn)=>{ const el = document.getElementById(id); if(el) el.onchange = (e)=>{ fn(e.target.value); renderDecoupeLaser(); }; };
+    bind('ld-ref', v=> laserDevis.reference = v.trim());
+    bind('ld-client', v=> laserDevis.client = v.trim());
+    bind('ld-qte', v=> laserDevis.qte = Math.max(1, parseInt(v)||1));
+    bind('ld-prog', v=> laserDevis.programmeEur = parseFloat(v)||0);
+    bind('ld-pec', v=> laserDevis.priseEnChargeEur = parseFloat(v)||0);
+    bind('ld-prixkg', v=> laserDevis.prixKgMatiere = parseFloat(v)||0);
+    bind('ld-taux', v=> laserDevis.tauxLaser = parseFloat(v)||0);
+    bind('ld-marge', v=> laserDevis.marge = (parseFloat(v)||0)/100);
+    const csvDevis = document.getElementById('ld-csv');
+    if(csvDevis) csvDevis.onclick = ()=>{
+      const dv = laserDevisCompute(calc);
+      const blob = new Blob(['\ufeff'+laserDevisCsv(dv)], { type:'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      const nom = (laserDevis.reference || (laserFileName||'devis').replace(/\.dxf$/i,'')).replace(/[^\w\-]+/g,'_');
+      a.href = URL.createObjectURL(blob); a.download = `devis-laser-${nom}.csv`; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+    };
+  }
+
   const histSave = document.getElementById('laser-hist-save');
   if(histSave) histSave.onclick = async ()=>{
     const reelRaw = parseFloat(document.getElementById('laser-hist-reel').value);
     const reel = reelRaw>0 ? reelRaw : null; // facultatif : peut être renseigné plus tard dans le suivi
-    const qte = Math.max(1, parseInt(document.getElementById('laser-hist-qte').value)||1);
+    const qte = Math.max(1, parseInt(laserDevis.qte)||1);
     const ok = await addLaserEntry({
       date: new Date().toISOString(),
       piece: document.getElementById('laser-hist-piece').value.trim(),
@@ -2036,7 +2209,7 @@ function renderDecoupeLaser(){
       largeurMm: Math.round(laserResult.bbox.maxX-laserResult.bbox.minX), hauteurMm: Math.round(laserResult.bbox.maxY-laserResult.bbox.minY),
       qte,
       // temps rapportés à une seule pièce pour que les données restent comparables
-      commande: '',
+      commande: '', client: laserDevis.client,
       tempsEstimeMin: +(calc.tempsTotalMin).toFixed(3), tempsReelMin: reel ? +(reel/qte).toFixed(3) : null
     });
     if(ok) toast(reel ? 'Découpe enregistrée dans le suivi' : 'Devis enregistré — temps réel à renseigner dans le suivi');
@@ -2051,6 +2224,7 @@ function renderDecoupeLaser(){
       const text = await file.text();
       laserResult = analyzeDxfForLaser(text);
       laserFileName = file.name;
+      laserDevis.reference = file.name.replace(/\.dxf$/i,'');
       toast('Fichier DXF analysé');
       renderDecoupeLaser();
     }catch(err){
@@ -2601,7 +2775,7 @@ function defaultEmbPiece(){
     coutDivers: 0,
     margeAppliquee: 0.25,
     matiere: 'Acier',
-    prixKgMatiere: 3,
+    prixKgMatiere: null, // null = prix au kilo de la matière défini dans Paramètres, modifiable pièce par pièce
     longueurDetourage: null, // null = calculée (contour du flanc + trous), modifiable à la main
     priseEnCharge: 0, // outillage + programme : valeur fixe, affichée en bas de devis, hors coût pièce
     pieceFileName: '',
@@ -2609,15 +2783,8 @@ function defaultEmbPiece(){
   };
 }
 
-/* Matières proposées : densité (kg/dm³) et prix au kilo par défaut (€) */
-const EMB_MATIERES = {
-  'Acier': { densite: 8, prixKg: 3 },
-  'Alu':   { densite: 2.7, prixKg: 5 },
-  'Inox':  { densite: 8, prixKg: 6 },
-};
-
 function computePiece(p){
-  const mat = EMB_MATIERES[p.matiere] || EMB_MATIERES['Acier'];
+  const mat = getMatiere(p.matiere);
   const poidsPiece = (p.longueurFlanc * p.largeurFlanc) * p.epaisseur * (mat.densite/1000000);
   const longueurCoupeAuto = (p.longueurFlanc + p.largeurFlanc + (p.nbDecoupes/2*3.2*p.diametreDecoupes)) * 2;
   const longueurCoupe = (p.longueurDetourage!=null && p.longueurDetourage>0) ? p.longueurDetourage : longueurCoupeAuto;
@@ -2646,7 +2813,8 @@ function computePiece(p){
   const coutLogistique = poidsLot < 30 ? 25 : (poidsLot < 100 ? poidsLot*0.5 : poidsLot*0.35);
 
   // Matière : calculée (poids du lot × prix/kg) tant qu'aucun montant n'est saisi à la main
-  const coutMatiereAuto = poidsLot * (p.prixKgMatiere!=null ? p.prixKgMatiere : mat.prixKg);
+  const prixKg = p.prixKgMatiere!=null ? p.prixKgMatiere : mat.prixKg;
+  const coutMatiereAuto = poidsLot * prixKg;
   const coutMatiere = (p.coutMatiere>0) ? p.coutMatiere : coutMatiereAuto;
 
   const coutGlobal = (p.coutAdmin||0) + (p.coutAccessoire||0) + coutMatiere + coutLaser + coutDebit + coutEmbFab + coutPliage
@@ -2655,7 +2823,7 @@ function computePiece(p){
   const prixVente = coutPieceUnit + coutPieceUnit*(p.margeAppliquee||0);
   const prixVenteGlobal = prixVente*p.qteLancement;
 
-  return { poidsPiece, longueurCoupe, longueurCoupeAuto, tempsDecoupeMin, tempsDecoupeLotMin, tempsDebitMin, coutMatiere, coutMatiereAuto,
+  return { poidsPiece, longueurCoupe, longueurCoupeAuto, tempsDecoupeMin, tempsDecoupeLotMin, tempsDebitMin, coutMatiere, coutMatiereAuto, prixKg,
     tLaserH, tDebitH, tEmbH, tPliageH, tMontageH, tLaser5axH, tCondH, tempsTotalH,
     coutLaser, coutDebit, coutEmbFab, coutPliage, coutRepriseMontage, coutLaser5Ax, coutCondition, coutLogistique,
     coutGlobal, coutPieceUnit, prixVente, prixVenteGlobal };
@@ -2835,7 +3003,7 @@ function renderEmbPieceForm(){
         <div class="field">
           <label>Matière</label>
           <select id="ep-matiere">
-            ${Object.keys(EMB_MATIERES).map(m=>`<option value="${m}" ${p.matiere===m?'selected':''}>${m}</option>`).join('')}
+            ${getMatieres().filter(m=>!m.outillage).map(m=>`<option value="${escapeHtml(m.nom)}" ${p.matiere===m.nom?'selected':''}>${escapeHtml(m.nom)}</option>`).join('')}
           </select>
         </div>
         ${field('Épaisseur (mm)','epaisseur',{step:0.1,min:0})}
@@ -2887,12 +3055,18 @@ function renderEmbPieceForm(){
       <div class="grid3">
         ${field('Administratif / chiffrage (€)','coutAdmin',{min:0})}
         ${field('Accessoire / quincaillerie (€)','coutAccessoire',{min:0})}
-        ${field('Prix matière au kilo (€) — Acier 3 / Alu 5 / Inox 6','prixKgMatiere',{step:0.1,min:0})}
+        <div class="field">
+          <label>Prix matière au kilo (€) — défini dans Paramètres</label>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <input type="number" step="0.1" min="0" id="ep-prixkg" value="${c.prixKg}">
+            ${p.prixKgMatiere!=null ? `<button class="btn ghost" id="ep-prixkg-reset" title="Revenir au prix de la matière (${getMatiere(p.matiere).prixKg} €/kg)" style="padding:2px 6px;">⤾</button>` : ''}
+          </div>
+        </div>
       </div>
       <div class="grid3">
         ${field('Matière — montant imposé (€), 0 = calculé','coutMatiere',{step:0.01,min:0})}
       </div>
-      <div style="font-size:11px;color:var(--ink-dim);margin:-2px 0 8px;">Matière calculée : ${c.poidsPiece.toFixed(3)} kg/pièce × ${p.qteLancement} × ${p.prixKgMatiere} €/kg = ${c.coutMatiereAuto.toFixed(2)} € (utilisée tant que le montant imposé est à 0).</div>
+      <div style="font-size:11px;color:var(--ink-dim);margin:-2px 0 8px;">Matière calculée : ${c.poidsPiece.toFixed(3)} kg/pièce × ${p.qteLancement} × ${c.prixKg} €/kg = ${c.coutMatiereAuto.toFixed(2)} € (utilisée tant que le montant imposé est à 0).</div>
       <div class="grid3">
         ${field('Emballage (€)','coutEmballage',{min:0})}
         ${field('Sous-traitance (€)','coutSousTraitance',{min:0})}
@@ -2977,9 +3151,12 @@ function renderEmbPieceForm(){
   document.getElementById('ep-nom').onchange = (e)=>{ p.nom = e.target.value; };
   document.getElementById('ep-matiere').onchange = (e)=>{
     p.matiere = e.target.value;
-    p.prixKgMatiere = (EMB_MATIERES[p.matiere]||EMB_MATIERES['Acier']).prixKg;
+    p.prixKgMatiere = null; // reprend le prix de la nouvelle matière (Paramètres)
     renderEmbPieceForm();
   };
+  document.getElementById('ep-prixkg').onchange = (e)=>{ const v = parseFloat(e.target.value); p.prixKgMatiere = (v>=0) ? v : null; renderEmbPieceForm(); };
+  const pkgReset = document.getElementById('ep-prixkg-reset');
+  if(pkgReset) pkgReset.onclick = ()=>{ p.prixKgMatiere = null; renderEmbPieceForm(); };
   document.getElementById('ep-detourage').onchange = (e)=>{
     const v = parseFloat(e.target.value);
     p.longueurDetourage = (v>0) ? v : null;
@@ -3036,7 +3213,7 @@ function defaultEmbOutil(){
     hasSerreFlan: true,
     symetrique: false,
     symetrieAxe: 'X',
-    prixKgMatiere: 4,
+    prixKgMatiere: null, // null = prix au kilo de la matière d'outillage (42CMD8) défini dans Paramètres
     prixUsinageM3: null, // null = suit le prix moyen /m³ de l'abaque d'usinage, modifiable
     matriceLOverride: null, matriceWOverride: null, matriceHOverride: null, // null = valeur calculée automatiquement, modifiable ensuite à la main
     poinconLOverride: null, poinconWOverride: null, poinconHOverride: null,
@@ -3254,15 +3431,17 @@ function computeOutil(o){
   const serreFlanL = hasSerreFlan ? matriceL : 0, serreFlanW = hasSerreFlan ? matriceW : 0, serreFlanH = hasSerreFlan ? 30 : 0;
 
   // Coût matière = volume (m³) × densité acier (kg/m³) = poids (kg) × prix/kg (42CMD8, par défaut 4€).
-  const prixKg = o.prixKgMatiere != null ? o.prixKgMatiere : 4;
+  const matOutil = getMatiere('42CMD8');
+  const prixKg = o.prixKgMatiere != null ? o.prixKgMatiere : matOutil.prixKg;
+  const densiteKgM3 = (matOutil.densite>0 ? matOutil.densite : 7.85)*1000;
   const matriceVolume = matriceL*matriceW*matriceH*1e-9;
-  const matricePoids = matriceVolume*DENSITE_ACIER_KG_M3;
+  const matricePoids = matriceVolume*densiteKgM3;
   const matriceCoutMatiere = matricePoids*prixKg;
   const poinconVolume = poinconL*poinconW*poinconH*1e-9;
-  const poinconPoids = poinconVolume*DENSITE_ACIER_KG_M3;
+  const poinconPoids = poinconVolume*densiteKgM3;
   const poinconCoutMatiere = poinconPoids*prixKg;
   const serreFlanVolume = hasSerreFlan ? serreFlanL*serreFlanW*serreFlanH*1e-9 : 0;
-  const serreFlanPoids = serreFlanVolume*DENSITE_ACIER_KG_M3;
+  const serreFlanPoids = serreFlanVolume*densiteKgM3;
   const serreFlanCoutMatiere = hasSerreFlan ? serreFlanPoids*prixKg : 0;
 
   const matiereTotal = matriceCoutMatiere + poinconCoutMatiere + serreFlanCoutMatiere;
@@ -3563,7 +3742,7 @@ function renderEmbOutilForm(){
 
       <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 10px;color:var(--ink-dim);">Coût matière — poids × prix au kilo</h3>
       <div class="field" style="max-width:280px;">
-        <label>Prix du kilo (42CMD8)</label>
+        <label>Prix du kilo (42CMD8) — défini dans Paramètres</label>
         <input type="number" step="0.01" id="eo-prix-kg" value="${c.prixKg}" min="0">
       </div>
       <div class="grid3">
