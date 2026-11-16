@@ -401,9 +401,10 @@ let currentTab = 'inventaire';
    v4.5 Confirmation de suppression intégrée (tôles, zones, pièces, outils, découpes), suppression de tôle corrigée
    v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
-   v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser) */
-const APP_VERSION = '4.8';
-const APP_VERSION_DATE = '27/10/2026';
+   v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
+   v4.9 Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
+const APP_VERSION = '4.9';
+const APP_VERSION_DATE = '13/11/2026';
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -1765,6 +1766,66 @@ const LASER_PRESETS = {
 
 function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
 
+// Surface nette réelle : contour extérieur (plus grande boucle fermée) moins les boucles intérieures
+function laserNetArea(entities){
+  const TOL = 0.05;
+  const paths = []; // chaque chemin = liste de points
+  const loops = []; // boucles déjà fermées
+  const arcPts = (cx,cy,r,a1,a2)=>{
+    let sw = a2-a1; if(sw<=0) sw += 2*Math.PI;
+    const n = Math.max(2, Math.ceil(sw/(Math.PI/36)));
+    const pts=[]; for(let i=0;i<=n;i++){ const a=a1+sw*i/n; pts.push({x:cx+r*Math.cos(a), y:cy+r*Math.sin(a)}); }
+    return pts;
+  };
+  entities.forEach(e=>{
+    if(e.type==='CIRCLE' && e.center && e.radius){
+      loops.push(arcPts(e.center.x,e.center.y,e.radius,0,2*Math.PI).slice(0,-1));
+    } else if(e.type==='LINE' && e.vertices && e.vertices.length>=2){
+      paths.push([{x:e.vertices[0].x,y:e.vertices[0].y},{x:e.vertices[1].x,y:e.vertices[1].y}]);
+    } else if((e.type==='LWPOLYLINE'||e.type==='POLYLINE') && e.vertices && e.vertices.length>1){
+      const pts = e.vertices.map(v=>({x:v.x,y:v.y}));
+      if(e.shape||e.closed) loops.push(pts); else paths.push(pts);
+    } else if(e.type==='ARC' && e.center && e.radius!=null){
+      paths.push(arcPts(e.center.x,e.center.y,e.radius,e.startAngle,e.endAngle));
+    }
+  });
+  const same=(p,q)=>Math.hypot(p.x-q.x,p.y-q.y)<=TOL;
+  // chaînage des chemins ouverts
+  const used = new Array(paths.length).fill(false);
+  for(let i=0;i<paths.length;i++){
+    if(used[i]) continue; used[i]=true;
+    let chain = paths[i].slice();
+    let grown = true;
+    while(grown){
+      grown = false;
+      if(chain.length>2 && same(chain[0],chain[chain.length-1])) break;
+      for(let j=0;j<paths.length;j++){
+        if(used[j]) continue;
+        const p = paths[j], h = chain[0], t = chain[chain.length-1];
+        if(same(t,p[0])){ chain = chain.concat(p.slice(1)); }
+        else if(same(t,p[p.length-1])){ chain = chain.concat(p.slice().reverse().slice(1)); }
+        else if(same(h,p[p.length-1])){ chain = p.slice(0,-1).concat(chain); }
+        else if(same(h,p[0])){ chain = p.slice().reverse().slice(0,-1).concat(chain); }
+        else continue;
+        used[j]=true; grown=true; break;
+      }
+    }
+    if(chain.length>3 && same(chain[0],chain[chain.length-1])) loops.push(chain.slice(0,-1));
+  }
+  const area = pts=>{ let s=0; for(let i=0;i<pts.length;i++){ const a=pts[i], b=pts[(i+1)%pts.length]; s+=a.x*b.y-b.x*a.y; } return Math.abs(s)/2; };
+  const inside = (pt,poly)=>{ let c=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ const a=poly[i], b=poly[j]; if((a.y>pt.y)!==(b.y>pt.y) && pt.x < (b.x-a.x)*(pt.y-a.y)/(b.y-a.y)+a.x) c=!c; } return c; };
+  const items = loops.map(l=>({pts:l, a:area(l)})).filter(l=>l.a>0);
+  if(!items.length) return null;
+  items.sort((x,y)=>y.a-x.a);
+  const outer = items[0];
+  let holes = 0;
+  items.slice(1).forEach(l=>{ if(inside(l.pts[0], outer.pts)) holes += l.a; });
+  const holePts = items.slice(1).filter(l=>inside(l.pts[0], outer.pts)).map(l=>l.pts);
+  const xs = outer.pts.map(q=>q.x), ys = outer.pts.map(q=>q.y);
+  const bb = { minX:Math.min(...xs), maxX:Math.max(...xs), minY:Math.min(...ys), maxY:Math.max(...ys) };
+  return { net: outer.a - holes, outer: outer.a, holes, loops: items.length, outerPts: outer.pts, holePts, bb };
+}
+
 function analyzeDxfForLaser(text){
   const parser = new DxfParser();
   const dxf = parser.parseSync(text);
@@ -1800,7 +1861,13 @@ function analyzeDxfForLaser(text){
       let sweep = a2 - a1;
       if(sweep < 0) sweep += 2*Math.PI;
       totalLength += e.radius * sweep;
-      bboxPt(e.center.x-e.radius, e.center.y-e.radius); bboxPt(e.center.x+e.radius, e.center.y+e.radius);
+      // Emprise réelle de l'arc (extrémités + passages par 0°/90°/180°/270° dans l'angle balayé), pas celle du cercle complet
+      bboxPt(e.center.x+e.radius*Math.cos(a1), e.center.y+e.radius*Math.sin(a1));
+      bboxPt(e.center.x+e.radius*Math.cos(a2), e.center.y+e.radius*Math.sin(a2));
+      for(let k=0;k<4;k++){
+        let d = k*Math.PI/2 - a1; d = ((d%(2*Math.PI))+2*Math.PI)%(2*Math.PI);
+        if(d <= sweep) bboxPt(e.center.x+e.radius*Math.cos(k*Math.PI/2), e.center.y+e.radius*Math.sin(k*Math.PI/2));
+      }
       pierces++;
     }
     else if(e.type === 'SPLINE' && e.controlPoints && e.controlPoints.length>1){
@@ -1821,7 +1888,22 @@ function analyzeDxfForLaser(text){
 
   if(pierces === 0) throw new Error('Aucune géométrie de découpe exploitable trouvée dans ce DXF.');
   const bbox = isFinite(minX) ? { minX, minY, maxX, maxY } : { minX:0, minY:0, maxX:0, maxY:0 };
-  return { totalLength, pierces, entities, bbox };
+  let netArea = null;
+  try{ netArea = laserNetArea(entities); }catch(err){ console.warn('Surface réelle non calculée', err); }
+  return { totalLength, pierces, entities, bbox, netArea };
+}
+
+function buildChuteSvg(na){
+  const bb = na.bb, w = bb.maxX-bb.minX, h = bb.maxY-bb.minY;
+  const pad = Math.max(w,h)*0.03;
+  const pt = q=> `${(q.x-bb.minX).toFixed(2)},${(bb.maxY-q.y).toFixed(2)}`; // Y inversé
+  const path = pts=> 'M'+pts.map(pt).join('L')+'Z';
+  const d = path(na.outerPts) + na.holePts.map(path).join('');
+  return `<svg viewBox="${-pad} ${-pad} ${w+2*pad} ${h+2*pad}" style="width:100%;max-width:760px;height:auto;display:block;" xmlns="http://www.w3.org/2000/svg">
+    <defs><pattern id="chute-hatch" width="${Math.max(w,h)/60}" height="${Math.max(w,h)/60}" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="${Math.max(w,h)/60}" stroke="#c0392b" stroke-width="${Math.max(w,h)/600}" opacity=".55"/></pattern></defs>
+    <rect x="0" y="0" width="${w}" height="${h}" fill="url(#chute-hatch)" stroke="#c0392b" stroke-width="${Math.max(w,h)/500}" stroke-dasharray="${Math.max(w,h)/100}"/>
+    <path d="${d}" fill="#7fb7d9" fill-rule="evenodd" stroke="#1f5f8b" stroke-width="${Math.max(w,h)/700}"/>
+  </svg>`;
 }
 
 function buildDxfSvg(entities, bbox){
@@ -1996,15 +2078,19 @@ function laserHistCsv(){
    DEVIS DÉCOUPE LASER — programme, prise en charge, matière, découpe, quantité ; export CSV
    (valeurs par défaut modifiables ; format CSV à adapter pour l'import Clipper)
 --------------------------------------------------------- */
-let laserDevis = { reference:'', client:'', qte:1, prixKgMatiere:null, programmeEur:30, priseEnChargeEur:0, tauxLaser:115, marge:0.25 };
+let laserDevis = { reference:'', client:'', qte:1, prixKgMatiere:null, programmeEur:30, priseEnChargeEur:0, tauxLaser:150, marge:0.25, baseMatiere:'reelle' };
 
 function laserDevisCompute(calc){
   const d = laserDevis;
   const qte = Math.max(1, parseInt(d.qte)||1);
-  const bb = laserResult.bbox;
+  const bb = (laserResult.netArea && laserResult.netArea.bb) ? laserResult.netArea.bb : laserResult.bbox; // rectangle exact du contour de la pièce (gravures exclues)
   const largeur = Math.max(0, bb.maxX-bb.minX), hauteur = Math.max(0, bb.maxY-bb.minY);
   const mat = getMatiere(laserParams.matiere);
-  const poidsUnit = largeur*hauteur*laserParams.epaisseur/1e6*mat.densite; // kg, rectangle englobant
+  const surfReelle = laserResult.netArea ? laserResult.netArea.net : null;
+  const surfRect = largeur*hauteur;
+  const useReelle = d.baseMatiere!=='rect' && surfReelle!=null;
+  const surface = useReelle ? surfReelle : surfRect; // mm²
+  const poidsUnit = surface*laserParams.epaisseur/1e6*mat.densite; // kg
   const prixKg = d.prixKgMatiere!=null ? d.prixKgMatiere : mat.prixKg;
   const matiereUnit = poidsUnit*prixKg;
   const L = laserLearnedRatio(laserParams.matiere, laserParams.epaisseur);
@@ -2013,14 +2099,14 @@ function laserDevisCompute(calc){
   const lignes = [
     { code:'PROG', libelle:'Programme', qte:1, pu:d.programmeEur||0 },
     { code:'PEC', libelle:'Prise en charge', qte:1, pu:d.priseEnChargeEur||0 },
-    { code:'MAT', libelle:`Matière ${laserParams.matiere} ép. ${laserParams.epaisseur} mm`, qte, pu:matiereUnit },
+    { code:'MAT', libelle:`Matière ${laserParams.matiere} ép. ${laserParams.epaisseur} mm — ${poidsUnit.toFixed(2).replace('.',',')} kg × ${prixKg.toFixed(2).replace('.',',')} €/kg (${useReelle?'surface réelle':'rectangle englobant'} ${(surface/100).toFixed(1).replace('.',',')} cm²)`, qte, pu:matiereUnit },
     { code:'LASER', libelle:'Découpe laser', qte, pu:laserUnit },
   ];
   lignes.forEach(l=> l.total = l.qte*l.pu);
   const sousTotal = lignes.reduce((sum,l)=>sum+l.total,0);
   const margeEur = sousTotal*(d.marge||0);
   const totalHt = sousTotal + margeEur;
-  return { qte, largeur, hauteur, poidsUnit, prixKg, tempsUnitMin, corrige: !!L, lignes, sousTotal, margeEur, totalHt, prixPiece: totalHt/qte };
+  return { qte, largeur, hauteur, chute: surfRect-(surfReelle||0), surfReelle, surfRect, useReelle, poidsUnit, prixKg, tempsUnitMin, corrige: !!L, lignes, sousTotal, margeEur, totalHt, prixPiece: totalHt/qte };
 }
 
 function laserDevisCsv(dv){
@@ -2113,6 +2199,7 @@ function renderDecoupeLaser(){
           <div class="field"><label>Prix matière (€/kg) — Paramètres</label><input type="number" step="0.1" min="0" id="ld-prixkg" value="${dv.prixKg}"></div>
         </div>
         <div class="grid3">
+          <div class="field"><label>Base de calcul matière</label><select id="ld-base"><option value="reelle"${dv.useReelle?' selected':''}>Surface réelle (${dv.surfReelle!=null?(dv.surfReelle/100).toFixed(1).replace('.',',')+' cm²':'indisponible'})</option><option value="rect"${!dv.useReelle?' selected':''}>Rectangle englobant (${(dv.surfRect/100).toFixed(1).replace('.',',')} cm²)</option></select></div>
           <div class="field"><label>Taux machine laser (€/h)</label><input type="number" step="1" min="0" id="ld-taux" value="${laserDevis.tauxLaser}"></div>
           <div class="field"><label>Marge (%)</label><input type="number" step="1" min="0" id="ld-marge" value="${Math.round((laserDevis.marge||0)*100)}"></div>
         </div>
@@ -2126,7 +2213,10 @@ function renderDecoupeLaser(){
             </tbody>
           </table>
         </div>
-        <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 12px;">Soit <b style="color:var(--ink);">${eur(dv.prixPiece)}</b> la pièce (frais fixes répartis sur ${dv.qte}). Matière calculée sur le rectangle englobant ${Math.round(dv.largeur)}×${Math.round(dv.hauteur)} mm (${dv.poidsUnit.toFixed(3)} kg/pièce) ; temps de découpe ${dv.tempsUnitMin.toFixed(2)} min/pièce${dv.corrige?' (corrigé d\'après ton historique)':' (estimation)'}. Les montants par défaut sont modifiables.</div>
+        <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 12px;">Soit <b style="color:var(--ink);">${eur(dv.prixPiece)}</b> la pièce (frais fixes répartis sur ${dv.qte}). Matière calculée sur ${dv.useReelle?'la surface réelle':'le rectangle englobant'} (rectangle ${dv.largeur.toFixed(1)}×${dv.hauteur.toFixed(1)} mm ; ${dv.poidsUnit.toFixed(3)} kg/pièce) ; temps de découpe ${dv.tempsUnitMin.toFixed(2)} min/pièce${dv.corrige?' (corrigé d\'après ton historique)':' (estimation)'}. Les montants par défaut sont modifiables.</div>
+        ${laserResult.netArea ? `<h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 8px;color:var(--ink-dim);">Pièce et chute dans le rectangle</h3>
+        <div style="border:1px solid var(--line);border-radius:var(--radius);padding:10px;background:var(--bg);">${buildChuteSvg(laserResult.netArea)}</div>
+        <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 14px;"><span style="display:inline-block;width:10px;height:10px;background:#7fb7d9;border:1px solid #1f5f8b;vertical-align:middle;"></span> Pièce ${(dv.surfReelle/100).toFixed(1).replace('.',',')} cm² (${(100*dv.surfReelle/dv.surfRect).toFixed(1).replace('.',',')} %) · <span style="display:inline-block;width:10px;height:10px;background:repeating-linear-gradient(45deg,#c0392b55,#c0392b55 2px,transparent 2px,transparent 4px);border:1px dashed #c0392b;vertical-align:middle;"></span> Chute ${(dv.chute/100).toFixed(1).replace('.',',')} cm² (${(100*dv.chute/dv.surfRect).toFixed(1).replace('.',',')} %) · Rectangle exact ${dv.largeur.toFixed(1).replace('.',',')} × ${dv.hauteur.toFixed(1).replace('.',',')} mm</div>` : ''}
         <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="ld-csv">Exporter le devis en CSV</button></div>`;
         })()}
 
@@ -2180,7 +2270,8 @@ function renderDecoupeLaser(){
     bind('ld-qte', v=> laserDevis.qte = Math.max(1, parseInt(v)||1));
     bind('ld-prog', v=> laserDevis.programmeEur = parseFloat(v)||0);
     bind('ld-pec', v=> laserDevis.priseEnChargeEur = parseFloat(v)||0);
-    bind('ld-prixkg', v=> laserDevis.prixKgMatiere = parseFloat(v)||0);
+    bind('ld-prixkg', v=> laserDevis.prixKgMatiere = (v.trim()!=='' && parseFloat(v)>=0) ? parseFloat(v) : null);
+    bind('ld-base', v=> laserDevis.baseMatiere = v);
     bind('ld-taux', v=> laserDevis.tauxLaser = parseFloat(v)||0);
     bind('ld-marge', v=> laserDevis.marge = (parseFloat(v)||0)/100);
     const csvDevis = document.getElementById('ld-csv');
@@ -2224,6 +2315,7 @@ function renderDecoupeLaser(){
       const text = await file.text();
       laserResult = analyzeDxfForLaser(text);
       laserFileName = file.name;
+      laserDevis.prixKgMatiere = null;
       laserDevis.reference = file.name.replace(/\.dxf$/i,'');
       toast('Fichier DXF analysé');
       renderDecoupeLaser();
