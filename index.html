@@ -17,6 +17,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/dxf-parser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-firestore-compat.js"></script>
@@ -345,8 +346,12 @@
       <button class="nav-btn" data-tab="taboutil"><span class="num">08</span> Outillage</button>
     </div>
     <div class="nav-group">
+      <div class="nav-group-title">Cintrage</div>
+      <button class="nav-btn" data-tab="cintrage"><span class="num">09</span> Tube cintré (STEP)</button>
+    </div>
+    <div class="nav-group">
       <div class="nav-group-title">Réglages</div>
-      <button class="nav-btn" data-tab="parametres"><span class="num">09</span> Paramètres</button>
+      <button class="nav-btn" data-tab="parametres"><span class="num">10</span> Paramètres</button>
     </div>
   </nav>
   <div class="sidebar-foot" id="sidebar-foot"><span class="dot"></span>Connexion…</div>
@@ -402,7 +407,7 @@ let currentTab = 'inventaire';
    v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
-   v4.9 Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
+   v4.9 Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
 const APP_VERSION = '4.9';
 const APP_VERSION_DATE = '13/11/2026';
 
@@ -705,6 +710,7 @@ function render(){
   else if(currentTab === 'laserhist') renderLaserHist();
   else if(currentTab === 'embpiece') renderEmbPiece();
   else if(currentTab === 'taboutil') renderEmbOutil();
+  else if(currentTab === 'cintrage') renderCintrage();
 }
 
 /* Utilisée par les écouteurs temps réel : on évite de redessiner l'onglet Scanner
@@ -1782,6 +1788,395 @@ function renderNestResult(result){
       </div>
     </div>
   `;
+}
+
+/* ---------------------------------------------------------
+   CINTRAGE — lecture d'un tube cintré au format STEP
+   Principe : dans un tube cintré, les tronçons droits sont des CYLINDRICAL_SURFACE et les
+   cintres des TOROIDAL_SURFACE (rayon majeur = rayon de cintrage sur fibre neutre, rayon
+   mineur = rayon du tube). On reconstitue la ligne moyenne : les points d'intersection sont
+   les sommets (et les deux extrémités) de la ligne brisée théorique, puis on calcule la LRA
+   (longueur rectiligne développée = droites + arcs).
+--------------------------------------------------------- */
+let cintrage = { fileName:'', raw:null, error:'', wire:null, rayonImpose:null, view:{ yaw:-0.7, pitch:0.45, zoom:1 } };
+
+const v3 = {
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  add:(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
+  mul:(a,k)=>[a[0]*k,a[1]*k,a[2]*k],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+  len:a=>Math.hypot(a[0],a[1],a[2]),
+  unit:a=>{ const l = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/l,a[1]/l,a[2]/l]; }
+};
+
+function stepParseEntities(text){
+  const body = text.replace(/\/\*[\s\S]*?\*\//g,'');
+  const ents = {};
+  const re = /#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*?)\)\s*;/g;
+  let m;
+  while((m = re.exec(body))) ents[m[1]] = { type:m[2], args:m[3] };
+  return ents;
+}
+
+function parseStepTube(text){
+  const E = stepParseEntities(text);
+  const clean = s => s.replace(/'[^']*'/g,'');
+  const refs = s => (clean(s).match(/#\d+/g)||[]).map(x=>x.slice(1));
+  const nums = s => (clean(s).replace(/#\d+/g,'').match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g)||[]).map(parseFloat);
+  const point = id => { const e = E[id]; if(!e) return null; const n = nums(e.args); return n.length>=3 ? n.slice(0,3) : null; };
+  const place = id => {
+    const e = E[id]; if(!e || e.type!=='AXIS2_PLACEMENT_3D') return null;
+    const r = refs(e.args); const loc = point(r[0]); const z = r[1] ? point(r[1]) : null;
+    return (loc && z) ? { loc, z: v3.unit(z) } : null;
+  };
+
+  const cyl = [], tor = [], verts = [];
+  Object.values(E).forEach(e=>{
+    if(e.type==='CYLINDRICAL_SURFACE'){
+      const pl = place(refs(e.args)[0]), n = nums(e.args);
+      if(pl && n.length) cyl.push({ P:pl.loc, d:pl.z, r:n[n.length-1] });
+    }else if(e.type==='TOROIDAL_SURFACE'){
+      const pl = place(refs(e.args)[0]), n = nums(e.args);
+      if(pl && n.length>=2) tor.push({ C:pl.loc, N:pl.z, R:n[0], r:n[1] });
+    }else if(e.type==='VERTEX_POINT'){
+      const p = point(refs(e.args)[0]); if(p) verts.push(p);
+    }
+  });
+  if(!cyl.length && !tor.length) throw new Error("Aucune surface cylindrique ou torique trouvée : ce STEP ne semble pas être un tube cintré en volume/surface.");
+
+  const distToLine = (p,P,d)=>{ const w = v3.sub(p,P); return v3.len(v3.sub(w, v3.mul(d, v3.dot(w,d)))); };
+
+  const rOut = tor.length ? Math.max(...tor.map(t=>t.r)) : Math.max(...cyl.map(c=>c.r));
+  const sameR = (a,b,tol)=> Math.abs(a-b) <= (tol||0.02);
+
+  // Droites (axes des tronçons) à rayon extérieur, sans doublon
+  const lines = [];
+  cyl.filter(c=>sameR(c.r, rOut)).forEach(c=>{
+    if(!lines.some(l=>Math.abs(v3.dot(l.d,c.d))>0.9999 && distToLine(c.P,l.P,l.d)<0.05)) lines.push({ P:c.P, d:c.d });
+  });
+  // Rayon intérieur éventuel (tube creux) : cylindre coaxial plus petit
+  let rIn = null;
+  cyl.filter(c=>c.r < rOut-0.02).forEach(c=>{
+    if(lines.some(l=>Math.abs(v3.dot(l.d,c.d))>0.9999 && distToLine(c.P,l.P,l.d)<0.05)) rIn = Math.max(rIn||0, c.r);
+  });
+
+  // Cintres (tores à rayon mineur = rayon extérieur), sans doublon
+  const bendsRaw = [];
+  tor.filter(t=>sameR(t.r, rOut)).forEach(t=>{
+    if(!bendsRaw.some(b=>v3.len(v3.sub(b.C,t.C))<0.05 && sameR(b.R,t.R,0.01) && Math.abs(v3.dot(b.N,t.N))>0.9999)) bendsRaw.push(t);
+  });
+
+  // Extrémités et orientation : sommets situés sur le cylindre d'une droite donnée
+  const vertsOnLine = l => verts.filter(p=> Math.abs(distToLine(p,l.P,l.d) - rOut) < 0.05 + 0.002*rOut);
+
+  let ordered, points, radii;
+  if(!bendsRaw.length){
+    if(lines.length!==1) throw new Error('Tube droit attendu avec un seul axe, ' + lines.length + ' trouvés.');
+    const vs = vertsOnLine(lines[0]);
+    if(vs.length<2) throw new Error("Extrémités du tube introuvables (sommets manquants).");
+    const ts = vs.map(p=>v3.dot(v3.sub(p,lines[0].P), lines[0].d));
+    const a = v3.add(lines[0].P, v3.mul(lines[0].d, Math.min(...ts)));
+    const b = v3.add(lines[0].P, v3.mul(lines[0].d, Math.max(...ts)));
+    points = [a,b]; radii = [];
+  }else{
+    // Graphe : droites = nœuds, cintres = arêtes (une droite est tangente à un tore si elle est dans son plan à distance R du centre)
+    const adj = lines.map(()=>[]);
+    bendsRaw.forEach((t,ti)=>{
+      const hit = [];
+      lines.forEach((l,li)=>{
+        if(Math.abs(v3.dot(l.d,t.N))>1e-3) return;
+        if(Math.abs(v3.dot(v3.sub(l.P,t.C),t.N))>0.05+0.001*t.R) return;
+        if(Math.abs(distToLine(t.C,l.P,l.d)-t.R) > 0.02*t.R+0.05) return;
+        hit.push(li);
+      });
+      if(hit.length!==2) throw new Error(`Cintre ${ti+1} : ${hit.length} tronçon(s) droit(s) rattaché(s) au lieu de 2 (cintres jointifs sans partie droite, ou modélisation non standard).`);
+      adj[hit[0]].push({ to:hit[1], bend:ti }); adj[hit[1]].push({ to:hit[0], bend:ti });
+    });
+    const ends = adj.map((a,i)=>a.length===1?i:-1).filter(i=>i>=0);
+    if(ends.length!==2 || adj.some(a=>a.length>2)) throw new Error("La ligne moyenne n'est pas un chemin simple (boucle ou branches) : tube non reconnu.");
+    const order = [ends[0]], bendOrder = [];
+    let prev = -1, cur = ends[0];
+    while(true){
+      const nxt = adj[cur].find(e=>e.to!==prev);
+      if(!nxt) break;
+      bendOrder.push(nxt.bend); order.push(nxt.to); prev = cur; cur = nxt.to;
+      if(order.length>lines.length+1) throw new Error('Parcours du tube impossible.');
+    }
+    if(order.length!==lines.length) throw new Error('Tous les tronçons droits ne sont pas reliés entre eux.');
+    // Intersections des axes successifs
+    const inter = [];
+    for(let k=0;k<order.length-1;k++){
+      const A = lines[order[k]], B = lines[order[k+1]];
+      const b = v3.dot(A.d,B.d), w0 = v3.sub(A.P,B.P), d = v3.dot(A.d,w0), e = v3.dot(B.d,w0);
+      const den = 1-b*b;
+      if(Math.abs(den)<1e-9) throw new Error('Cintre à 180° (axes parallèles) : point d\'intersection non défini.');
+      const t = (b*e-d)/den, s = (e-b*d)/den;
+      inter.push(v3.mul(v3.add(v3.add(A.P,v3.mul(A.d,t)), v3.add(B.P,v3.mul(B.d,s))), 0.5));
+    }
+    // Extrémités : sommet le plus éloigné de l'intersection voisine le long de l'axe
+    const endPoint = (li, I)=>{
+      const l = lines[li], vs = vertsOnLine(l);
+      if(!vs.length) throw new Error('Extrémité du tube introuvable (sommets manquants).');
+      const cen = vs.reduce((a,p)=>v3.add(a,p),[0,0,0]).map(x=>x/vs.length);
+      const away = Math.sign(v3.dot(v3.sub(cen,I), l.d)) || 1; // sens de l.d qui s'éloigne de I
+      const tmax = Math.max(...vs.map(p=>away*v3.dot(v3.sub(p,I), l.d)));
+      return v3.add(I, v3.mul(l.d, away*tmax));
+    };
+    const start = endPoint(order[0], inter[0]);
+    const end = endPoint(order[order.length-1], inter[inter.length-1]);
+    points = [start, ...inter, end];
+    radii = bendOrder.map(bi=>bendsRaw[bi].R);
+  }
+  return { points, radii, OD: 2*rOut, ID: rIn!=null ? 2*rIn : null };
+}
+
+function cintrageMetrics(raw, rImpose){
+  const P = raw.points, n = P.length-2;
+  const dirs = []; for(let i=0;i<P.length-1;i++) dirs.push(v3.unit(v3.sub(P[i+1],P[i])));
+  const bends = [];
+  for(let i=1;i<=n;i++){
+    const th = Math.acos(Math.max(-1, Math.min(1, v3.dot(dirs[i-1],dirs[i]))));
+    const R = rImpose>0 ? rImpose : raw.radii[i-1];
+    bends.push({ i, th, deg: th*180/Math.PI, R, T: R*Math.tan(th/2), arc: R*th, B: null });
+  }
+  for(let i=2;i<=n;i++){
+    const n1 = v3.cross(dirs[i-2],dirs[i-1]), n2 = v3.cross(dirs[i-1],dirs[i]);
+    if(v3.len(n1)<1e-9 || v3.len(n2)<1e-9) continue;
+    const a = v3.unit(n1), b = v3.unit(n2);
+    bends[i-1].B = Math.atan2(v3.dot(v3.cross(a,b),dirs[i-1]), v3.dot(a,b))*180/Math.PI;
+  }
+  const straights = [];
+  for(let j=0;j<P.length-1;j++){
+    const len = v3.len(v3.sub(P[j+1],P[j]));
+    const t0 = j>=1 ? bends[j-1].T : 0, t1 = j+1<=n ? bends[j].T : 0;
+    straights.push({ j, ipLen: len, len: len - t0 - t1 });
+  }
+  const sumStraight = straights.reduce((s,x)=>s+x.len,0), sumArc = bends.reduce((s,b)=>s+b.arc,0);
+  return { points:P, dirs, bends, straights, sumStraight, sumArc, LRA: sumStraight+sumArc, negative: straights.some(x=>x.len < -0.01) };
+}
+
+/* Points 3D de la ligne moyenne avec arcs échantillonnés (pour le viewer) */
+function cintrageCenterline(m){
+  const P = m.points, out = [P[0]];
+  m.bends.forEach((b,k)=>{
+    const I = P[k+1], din = m.dirs[k], dout = m.dirs[k+1];
+    const A = v3.sub(I, v3.mul(din,b.T)), B = v3.add(I, v3.mul(dout,b.T));
+    out.push(A);
+    if(b.th>1e-6){
+      const mv = v3.unit(v3.sub(dout, v3.mul(din, v3.dot(din,dout)))), C = v3.add(A, v3.mul(mv,b.R)); // mv = perpendiculaire à din, côté intérieur du cintre
+      const N = Math.max(4, Math.ceil(b.th/(Math.PI/24)));
+      for(let s=1;s<N;s++){
+        const f = b.th*s/N;
+        out.push(v3.add(C, v3.add(v3.mul(mv,-b.R*Math.cos(f)), v3.mul(din,b.R*Math.sin(f)))));
+      }
+    }
+    out.push(B);
+  });
+  out.push(P[P.length-1]);
+  return out;
+}
+
+function cintrageViewerSvg(){
+  const W = 760, H = 470, v = cintrage.view;
+  const m = cintrage.raw ? cintrageMetrics(cintrage.raw, cintrage.rayonImpose) : null;
+  const center3 = m ? cintrageCenterline(m) : [];
+  const wire = cintrage.wire || [];
+  const all = center3.slice(); wire.forEach(l=>l.forEach(p=>all.push(p)));
+  if(!all.length) return '';
+  const mn=[Infinity,Infinity,Infinity], mx=[-Infinity,-Infinity,-Infinity];
+  all.forEach(p=>{ for(let a=0;a<3;a++){ if(p[a]<mn[a])mn[a]=p[a]; if(p[a]>mx[a])mx[a]=p[a]; } });
+  const c = [0,1,2].map(a=>(mn[a]+mx[a])/2);
+  const rad = Math.max(1, ...all.map(p=>v3.len(v3.sub(p,c))));
+  const scale = Math.min(W,H)/2*0.88/rad*v.zoom;
+  const cy=Math.cos(v.yaw), sy=Math.sin(v.yaw), cp=Math.cos(v.pitch), sp=Math.sin(v.pitch);
+  const proj = p=>{
+    const x=p[0]-c[0], y=p[1]-c[1], z=p[2]-c[2];
+    const x1=cy*x-sy*y, y1=sy*x+cy*y, y2=cp*y1-sp*z, z2=sp*y1+cp*z;
+    return [W/2 + x1*scale, H/2 - z2*scale];
+  };
+  const pt = p=>{ const q=proj(p); return q[0].toFixed(1)+','+q[1].toFixed(1); };
+  const wireD = wire.map(l=>'M'+l.map(pt).join('L')).join('');
+  let svg = `<svg id="cint-svg" width="100%" viewBox="0 0 ${W} ${H}" style="background:#fff;display:block;touch-action:none;cursor:grab;" xmlns="http://www.w3.org/2000/svg">`;
+  if(wireD) svg += `<path d="${wireD}" fill="none" stroke="#9aa3ab" stroke-width="0.7"/>`;
+  if(m){
+    const od = Math.max(2, cintrage.raw.OD*scale);
+    svg += `<polyline points="${center3.map(pt).join(' ')}" fill="none" stroke="rgba(91,147,179,0.28)" stroke-width="${od.toFixed(1)}" stroke-linejoin="round"/>`;
+    svg += `<polyline points="${center3.map(pt).join(' ')}" fill="none" stroke="#1f5f8b" stroke-width="1.6" stroke-linejoin="round"/>`;
+    m.points.forEach((p,i)=>{
+      const q = proj(p);
+      const lab = i===0 ? 'Départ' : (i===m.points.length-1 ? 'Fin' : 'P'+i);
+      svg += `<circle cx="${q[0].toFixed(1)}" cy="${q[1].toFixed(1)}" r="4.5" fill="#c0392b" stroke="#fff" stroke-width="1"/><text x="${(q[0]+7).toFixed(1)}" y="${(q[1]-7).toFixed(1)}" font-size="12" font-weight="600" fill="#c0392b">${lab}</text>`;
+    });
+  }
+  return svg + '</svg>';
+}
+
+function cintrageAttachViewer(){
+  const box = document.getElementById('cint-viewer');
+  if(!box) return;
+  const redraw = ()=>{ const w = document.getElementById('cint-svg-wrap'); if(w) w.innerHTML = cintrageViewerSvg(); };
+  let drag = null;
+  box.onpointerdown = e=>{ if(e.target.closest('button')) return; drag = { x:e.clientX, y:e.clientY, yaw:cintrage.view.yaw, pitch:cintrage.view.pitch }; box.setPointerCapture(e.pointerId); };
+  box.onpointermove = e=>{
+    if(!drag) return;
+    cintrage.view.yaw = drag.yaw + (e.clientX-drag.x)*0.01;
+    cintrage.view.pitch = Math.max(-1.5, Math.min(1.5, drag.pitch + (e.clientY-drag.y)*0.01));
+    redraw();
+  };
+  box.onpointerup = box.onpointercancel = ()=>{ drag = null; };
+  box.onwheel = e=>{ e.preventDefault(); cintrage.view.zoom = Math.max(0.3, Math.min(8, cintrage.view.zoom*(e.deltaY<0?1.12:0.89))); redraw(); };
+  const set = (yaw,pitch)=>()=>{ cintrage.view = { yaw, pitch, zoom:1 }; redraw(); };
+  box.querySelector('[data-v-iso]').onclick = set(-0.7,0.45);
+  box.querySelector('[data-v-face]').onclick = set(0,0);
+  box.querySelector('[data-v-dessus]').onclick = set(0,1.5707);
+  box.querySelector('[data-v-cote]').onclick = set(-1.5707,0);
+}
+
+function cintrageFmt(n,d){ return (n==null||isNaN(n)) ? '—' : Number(n).toFixed(d==null?1:d).replace('.',','); }
+
+function cintrageExport(m){
+  const nom = (cintrage.fileName||'tube').replace(/\.(step|stp)$/i,'');
+  const raw = cintrage.raw;
+  const header = ['N°','Type','X (mm)','Y (mm)','Z (mm)','Angle de cintrage (°)','Rayon de cintrage (mm)','Tangente (mm)','Longueur droite suivante (mm)','Arc développé (mm)','Rotation de plan B (°)'];
+  const rows = m.points.map((p,i)=>{
+    const b = (i>=1 && i<=m.bends.length) ? m.bends[i-1] : null;
+    return [ i, i===0?'Départ':(b?'Intersection P'+i:'Fin'), p[0], p[1], p[2],
+      b?b.deg:null, b?b.R:null, b?b.T:null, i<m.straights.length ? m.straights[i].len : null, b?b.arc:null, b&&b.B!=null?b.B:null ];
+  });
+  // Longueur droite "avant" : on la range sur la ligne du point de départ du tronçon (tronçon j commence au point j)
+  const round = (x,d)=> x==null ? null : Math.round(x*Math.pow(10,d))/Math.pow(10,d);
+  const dataRows = rows.map(r=>[r[0],r[1],round(r[2],3),round(r[3],3),round(r[4],3),round(r[5],2),round(r[6],2),round(r[7],2),round(r[8],2),round(r[9],2),round(r[10],2)]);
+
+  if(typeof XLSX === 'undefined'){
+    const esc = v=>`"${String(v==null?'':v).replace(/"/g,'""').replace('.',',')}"`;
+    const csv = [header.concat([]).map(h=>`"${h}"`).join(';')].concat(dataRows.map(r=>r.map(esc).join(';'))).concat([`"";"LRA (mm)";"${cintrageFmt(m.LRA,2)}"`]).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'})); a.download = `cintrage_${nom}.csv`; a.click();
+    toast('Bibliothèque Excel indisponible (hors ligne) : export CSV à la place'); return;
+  }
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([header].concat(dataRows));
+  const last = dataRows.length+1;
+  // Ligne de totaux avec formules
+  const tot = dataRows.length+3;
+  XLSX.utils.sheet_add_aoa(ws, [
+    ['','Somme des longueurs droites (mm)'], ['','Somme des arcs développés (mm)'], ['','LRA — longueur développée (mm)']
+  ], { origin:'A'+tot });
+  ws['I'+tot] = { t:'n', f:`SUM(I2:I${last})`, v: round(m.sumStraight,2) };
+  ws['I'+(tot+1)] = { t:'n', f:`SUM(J2:J${last})`, v: round(m.sumArc,2) };
+  ws['I'+(tot+2)] = { t:'n', f:`I${tot}+I${tot+1}`, v: round(m.LRA,2) };
+  ws['!ref'] = `A1:K${tot+2}`;
+  ws['!cols'] = [6,18,12,12,12,20,22,15,28,20,22].map(w=>({wch:w}));
+  XLSX.utils.book_append_sheet(wb, ws, "Points d'intersection");
+
+  const synth = [
+    ['Fichier STEP', cintrage.fileName],
+    ['Diamètre extérieur (mm)', round(raw.OD,2)],
+    ['Épaisseur de paroi (mm)', raw.ID!=null ? round((raw.OD-raw.ID)/2,2) : 'non détectée (tube plein ou non lisible)'],
+    ['Nombre de cintrages', m.bends.length],
+    ['Rayon de cintrage', cintrage.rayonImpose>0 ? cintrage.rayonImpose+' (imposé)' : 'lu dans le fichier (par cintre)'],
+    ['LRA — longueur rectiligne développée (mm)', round(m.LRA,2)],
+    ['dont longueurs droites (mm)', round(m.sumStraight,2)],
+    ['dont arcs développés (mm)', round(m.sumArc,2)],
+    [],
+    ['Programme cintreuse', 'Y = longueur droite avant le cintre (mm) · B = rotation de plan (°) · C = angle de cintrage (°)'],
+    ['Cintre','Y (mm)','B (°)','C (°)','Rayon (mm)']
+  ];
+  m.bends.forEach((b,k)=> synth.push([b.i, round(m.straights[k].len,2), b.B==null?0:round(b.B,2), round(b.deg,2), round(b.R,2)]));
+  synth.push(['Reste droit final', round(m.straights[m.straights.length-1].len,2)]);
+  const ws2 = XLSX.utils.aoa_to_sheet(synth);
+  ws2['!cols'] = [{wch:44},{wch:16},{wch:12},{wch:12},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws2, 'Synthèse LRA');
+  XLSX.writeFile(wb, `cintrage_${nom}.xlsx`);
+  toast('Fichier Excel exporté');
+}
+
+function renderCintrage(){
+  const view = document.getElementById('view');
+  const raw = cintrage.raw;
+  const m = raw ? cintrageMetrics(raw, cintrage.rayonImpose) : null;
+  view.innerHTML = `
+    <header class="page">
+      <div>
+        <div class="eyebrow">Cintrage</div>
+        <h1>Cintrage de tube</h1>
+        <div class="lede">Charge le fichier STEP d'un tube cintré : l'application relève les points d'intersection de la ligne moyenne, calcule la LRA (longueur développée) et exporte le tout dans Excel.</div>
+      </div>
+    </header>
+
+    <div class="modal" style="max-width:760px;margin:0 0 24px;box-shadow:none;">
+      <div class="field">
+        <label>Fichier STEP du tube cintré</label>
+        <input type="file" id="cint-file" accept=".step,.stp">
+        ${cintrage.fileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(cintrage.fileName)}</span>` : ''}
+        <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Le tube doit être un solide ou une surface avec ses tronçons droits (cylindres) et ses cintres (tores).</span>
+      </div>
+      ${cintrage.error ? `<div style="color:var(--danger);font-size:13px;margin-top:10px;">${escapeHtml(cintrage.error)}</div>` : ''}
+
+      ${m ? `
+      <div class="grid3" style="margin:16px 0;">
+        <div class="result-card"><div style="font-family:var(--display);font-size:26px;color:var(--ink);">${cintrageFmt(m.LRA,1)} mm</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">LRA (longueur développée)</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:26px;color:var(--ink);">${m.bends.length}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">cintrage${m.bends.length>1?'s':''}</div></div>
+        <div class="result-card"><div style="font-family:var(--display);font-size:26px;color:var(--ink);">Ø ${cintrageFmt(raw.OD,1)}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">${raw.ID!=null ? 'paroi '+cintrageFmt((raw.OD-raw.ID)/2,1)+' mm' : 'diamètre extérieur'}</div></div>
+      </div>
+      <div class="grid2">
+        <div class="field"><label>Rayon de cintrage imposé (mm) — vide = rayon lu dans le fichier</label><input type="number" step="0.1" min="0" id="cint-rayon" value="${cintrage.rayonImpose||''}" placeholder="${raw.radii.length ? cintrageFmt(raw.radii[0],1) : ''}"></div>
+        <div class="field" style="display:flex;align-items:flex-end;"><button class="btn primary" id="cint-export">Exporter en Excel</button></div>
+      </div>
+      ${m.negative ? `<div style="color:var(--danger);font-size:12px;margin-bottom:8px;">Attention : avec ce rayon, une longueur droite devient négative (cintres trop rapprochés).</div>` : ''}
+      ` : ''}
+    </div>
+
+    ${(m || cintrage.wire) ? `
+    <div id="cint-viewer" style="position:relative;max-width:760px;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-bottom:8px;">
+      <div id="cint-svg-wrap">${cintrageViewerSvg()}</div>
+      <div style="position:absolute;top:8px;right:8px;display:flex;gap:4px;">
+        <button class="btn small" data-v-iso>Iso</button><button class="btn small" data-v-face>Face</button><button class="btn small" data-v-dessus>Dessus</button><button class="btn small" data-v-cote>Côté</button>
+      </div>
+      <div style="position:absolute;bottom:6px;left:10px;font-size:11px;color:var(--ink-dim);">Glisser = tourner · molette = zoom · points rouges = intersections</div>
+    </div>` : ''}
+
+    ${m ? `
+    <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Points d'intersection</h3>
+    <div class="table-wrap"><table style="min-width:640px;">
+      <thead><tr><th>Point</th><th>X</th><th>Y</th><th>Z</th><th>Angle (°)</th><th>Rayon</th><th>Tangente</th><th>Droite suivante</th><th>Arc</th></tr></thead>
+      <tbody>${m.points.map((p,i)=>{
+        const b = (i>=1 && i<=m.bends.length) ? m.bends[i-1] : null;
+        const s = i<m.straights.length ? m.straights[i] : null;
+        return `<tr><td>${i===0?'Départ':(b?'P'+i:'Fin')}</td><td>${cintrageFmt(p[0],2)}</td><td>${cintrageFmt(p[1],2)}</td><td>${cintrageFmt(p[2],2)}</td><td>${b?cintrageFmt(b.deg,2):''}</td><td>${b?cintrageFmt(b.R,2):''}</td><td>${b?cintrageFmt(b.T,2):''}</td><td>${s?cintrageFmt(s.len,2):''}</td><td>${b?cintrageFmt(b.arc,2):''}</td></tr>`;
+      }).join('')}</tbody>
+    </table></div>
+    <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 18px;">Coordonnées dans le repère du fichier STEP (mm). « Droite suivante » = longueur droite entre la fin du cintre précédent et le début du suivant. LRA = ${cintrageFmt(m.sumStraight,2)} (droites) + ${cintrageFmt(m.sumArc,2)} (arcs) = <b>${cintrageFmt(m.LRA,2)} mm</b>.</div>
+
+    <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Programme cintreuse (Y / B / C)</h3>
+    <div class="table-wrap"><table style="min-width:420px;">
+      <thead><tr><th>Cintre</th><th>Y — droite avant (mm)</th><th>B — rotation de plan (°)</th><th>C — angle (°)</th></tr></thead>
+      <tbody>${m.bends.map((b,k)=>`<tr><td>${b.i}</td><td>${cintrageFmt(m.straights[k].len,2)}</td><td>${b.B==null?'0,00':cintrageFmt(b.B,2)}</td><td>${cintrageFmt(b.deg,2)}</td></tr>`).join('')}
+      <tr><td>Reste droit final</td><td>${cintrageFmt(m.straights[m.straights.length-1].len,2)}</td><td></td><td></td></tr></tbody>
+    </table></div>` : ''}
+  `;
+
+  document.getElementById('cint-file').onchange = async (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    cintrage.fileName = file.name; cintrage.raw = null; cintrage.error = ''; cintrage.wire = null; cintrage.rayonImpose = null;
+    try{
+      const text = await file.text();
+      try{ cintrage.wire = parseStepWireframe(text); }catch(err){ console.warn('Fil de fer STEP indisponible', err); }
+      cintrage.raw = parseStepTube(text);
+      toast('Tube analysé');
+    }catch(err){
+      console.error(err);
+      cintrage.error = err.message;
+    }
+    e.target.value = '';
+    renderCintrage();
+  };
+  const rayon = document.getElementById('cint-rayon');
+  if(rayon) rayon.onchange = ()=>{ const v = parseFloat(rayon.value); cintrage.rayonImpose = v>0 ? v : null; renderCintrage(); };
+  const exp = document.getElementById('cint-export');
+  if(exp) exp.onclick = ()=> cintrageExport(m);
+  cintrageAttachViewer();
 }
 
 /* ---------------------------------------------------------
