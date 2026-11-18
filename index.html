@@ -407,7 +407,7 @@ let currentTab = 'inventaire';
    v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
-   v4.9 Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
+   v4.9 Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) ; Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
 const APP_VERSION = '4.9';
 const APP_VERSION_DATE = '13/11/2026';
 
@@ -2185,6 +2185,8 @@ function renderCintrage(){
 let laserParams = { vitesse: 3000, tempsPercage: 0.5, vitesseRapide: 15000, matiere: 'Acier', epaisseur: 3 };
 let laserResult = null;
 let laserFileName = '';
+let laserStepModel = null; // topologie du STEP chargé (pour recalculer le développé quand K change)
+let laserStepK = 0.4;
 
 const LASER_PRESETS = {
   'Acier':      { 1: 6000, 2: 4000, 3: 3000, 5: 1800, 8: 1000 },
@@ -2253,6 +2255,278 @@ function laserNetArea(entities){
   const bb = { minX:Math.min(...xs), maxX:Math.max(...xs), minY:Math.min(...ys), maxY:Math.max(...ys) };
   return { net: outer.a - holes, outer: outer.a, holes, loops: items.length, outerPts: outer.pts, holePts, bb };
 }
+
+/* ---------------------------------------------------------
+   DÉVELOPPÉ DE TÔLERIE À PARTIR D'UN STEP (découpe laser)
+   Hypothèse : tôle pliée composée de faces PLANES et de plis CYLINDRIQUES.
+   - on part de la plus grande face plane et on déplie de proche en proche à travers les plis ;
+   - longueur d'un pli à plat = (rayon neutre) × angle, avec rayon neutre = rayon intérieur + K × épaisseur ;
+   - on en déduit contour (longueur de découpe), nombre de perçages (contours), surface, rectangle englobant.
+   Les pièces embouties / à surfaces gauches (B-spline…) ne sont pas dépliables avec cette méthode.
+--------------------------------------------------------- */
+const m3 = {
+  apply:(T,p)=>[T.R[0][0]*p[0]+T.R[0][1]*p[1]+T.R[0][2]*p[2]+T.t[0], T.R[1][0]*p[0]+T.R[1][1]*p[1]+T.R[1][2]*p[2]+T.t[1], T.R[2][0]*p[0]+T.R[2][1]*p[1]+T.R[2][2]*p[2]+T.t[2]],
+  applyR:(T,p)=>[T.R[0][0]*p[0]+T.R[0][1]*p[1]+T.R[0][2]*p[2], T.R[1][0]*p[0]+T.R[1][1]*p[1]+T.R[1][2]*p[2], T.R[2][0]*p[0]+T.R[2][1]*p[1]+T.R[2][2]*p[2]],
+  compose:(A,B)=>{ // A ∘ B
+    const R=[[0,0,0],[0,0,0],[0,0,0]];
+    for(let i=0;i<3;i++) for(let j=0;j<3;j++) R[i][j]=A.R[i][0]*B.R[0][j]+A.R[i][1]*B.R[1][j]+A.R[i][2]*B.R[2][j];
+    const bt = m3.applyR(A,B.t);
+    return { R, t:[bt[0]+A.t[0], bt[1]+A.t[1], bt[2]+A.t[2]] };
+  },
+  identity:()=>({ R:[[1,0,0],[0,1,0],[0,0,1]], t:[0,0,0] }),
+  rotAxis:(a,q,phi)=>{ // rotation d'angle phi autour de l'axe unitaire a passant par q
+    const c=Math.cos(phi), s=Math.sin(phi), C=1-c, [x,y,z]=a;
+    const R=[[c+x*x*C, x*y*C-z*s, x*z*C+y*s],[y*x*C+z*s, c+y*y*C, y*z*C-x*s],[z*x*C-y*s, z*y*C+x*s, c+z*z*C]];
+    const Rq = [R[0][0]*q[0]+R[0][1]*q[1]+R[0][2]*q[2], R[1][0]*q[0]+R[1][1]*q[1]+R[1][2]*q[2], R[2][0]*q[0]+R[2][1]*q[1]+R[2][2]*q[2]];
+    return { R, t:[q[0]-Rq[0], q[1]-Rq[1], q[2]-Rq[2]] };
+  }
+};
+
+function stepSheetParse(text){
+  const E = stepParseEntities(text);
+  const clean = s => s.replace(/'[^']*'/g,'');
+  const refs = s => (clean(s).match(/#\d+/g)||[]).map(x=>x.slice(1));
+  const nums = s => (clean(s).replace(/#\d+/g,'').match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g)||[]).map(parseFloat);
+  const flagT = s => /\.T\.\s*$/.test(s.trim());
+  const ptCache = {};
+  const point = id => { if(ptCache[id]) return ptCache[id]; const e=E[id]; if(!e) return null; const n=nums(e.args); return (ptCache[id] = n.length>=3 ? n.slice(0,3) : null); };
+  const place = id => {
+    const e = E[id]; if(!e || e.type!=='AXIS2_PLACEMENT_3D') return null;
+    const r = refs(e.args); const loc = point(r[0]); const z = r[1]?point(r[1]):null; const x = r[2]?point(r[2]):null;
+    if(!loc||!z) return null;
+    const zu = v3.unit(z); let xu = x ? v3.unit(x) : null;
+    if(!xu){ const t = Math.abs(zu[2])<0.9 ? [0,0,1] : [1,0,0]; xu = v3.unit(v3.cross(zu,t)); }
+    return { loc, z:zu, x:xu };
+  };
+  const vertexPt = id => { const e=E[id]; return (e && e.type==='VERTEX_POINT') ? point(refs(e.args)[0]) : null; };
+
+  function deBoor(p, U, Pw, u){
+    const n = Pw.length-1; let k = p;
+    while(k<n && u>=U[k+1]) k++;
+    if(u>=U[U.length-1-p]) k = n;
+    const d=[]; for(let i=0;i<=p;i++) d[i]=Pw[k-p+i].slice();
+    for(let r=1;r<=p;r++) for(let i=p;i>=r;i--){
+      const den = U[k+1+i-r]-U[k+i-p], al = den!==0 ? (u-U[k+i-p])/den : 0;
+      d[i] = [0,1,2].map(ax=>(1-al)*d[i-1][ax]+al*d[i][ax]);
+    }
+    return d[p];
+  }
+
+  const edgeCache = {};
+  function edgeInfo(id){ // points de v1 vers v2 le long de la courbe + longueur + type
+    if(edgeCache[id]) return edgeCache[id];
+    const e = E[id]; const r = refs(e.args);
+    const p1 = vertexPt(r[0]), p2 = vertexPt(r[1]); const cv = E[r[2]]; const sense = flagT(e.args);
+    let pts = [p1,p2], type = 'OTHER', len = null;
+    if(cv && cv.type==='LINE'){ type='LINE'; len = v3.len(v3.sub(p2,p1)); }
+    else if(cv && cv.type==='CIRCLE'){
+      const pl = place(refs(cv.args)[0]); const rad = nums(cv.args).slice(-1)[0];
+      if(pl && rad>0){
+        type='CIRCLE';
+        const yv = v3.cross(pl.z, pl.x);
+        const ang = p=>{ const w=v3.sub(p,pl.loc); return Math.atan2(v3.dot(w,yv), v3.dot(w,pl.x)); };
+        const a1 = ang(p1), a2 = ang(p2);
+        let d;
+        if(r[0]===r[1]) d = sense ? 2*Math.PI : -2*Math.PI;
+        else { d = sense ? ((a2-a1)%(2*Math.PI)+2*Math.PI)%(2*Math.PI) : -(((a1-a2)%(2*Math.PI)+2*Math.PI)%(2*Math.PI)); if(Math.abs(d)<1e-9) d = sense?2*Math.PI:-2*Math.PI; }
+        const n = Math.max(2, Math.ceil(Math.abs(d)/(Math.PI/36)));
+        pts = [];
+        for(let i=0;i<=n;i++){ const a = a1 + d*i/n; pts.push(v3.add(pl.loc, v3.add(v3.mul(pl.x, rad*Math.cos(a)), v3.mul(yv, rad*Math.sin(a))))); }
+        pts[0] = p1; pts[n] = p2;
+        len = rad*Math.abs(d);
+      }
+    }else if(cv && cv.type==='B_SPLINE_CURVE_WITH_KNOTS'){
+      const m = /^\s*'[^']*'\s*,\s*(\d+)\s*,\s*\(([^)]+)\)\s*,[^,]+,[^,]+,[^,]+,\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)/.exec(cv.args);
+      if(m){
+        const deg = parseInt(m[1],10), cps = m[2].split(',').map(s=>point(s.trim().replace('#','')));
+        const mult = m[3].split(',').map(s=>parseInt(s.trim(),10)), vals = m[4].split(',').map(s=>parseFloat(s.trim()));
+        if(cps.every(Boolean) && cps.length>deg){
+          const U=[]; mult.forEach((mu,i)=>{ for(let j=0;j<mu;j++) U.push(vals[i]); });
+          const u0=U[deg], u1=U[U.length-1-deg], N=24, line=[];
+          for(let i=0;i<=N;i++) line.push(deBoor(deg,U,cps,i===N?u1-1e-9:u0+(u1-u0)*i/N));
+          // la courbe est dans le sens croissant du paramètre : on oriente de v1 vers v2
+          const dStart = v3.len(v3.sub(line[0],p1)), dEnd = v3.len(v3.sub(line[N],p1));
+          pts = dStart<=dEnd ? line : line.reverse();
+          type='BSPLINE';
+        }
+      }
+    }
+    if(len==null){ len = 0; for(let i=0;i<pts.length-1;i++) len += v3.len(v3.sub(pts[i+1],pts[i])); }
+    return (edgeCache[id] = { id, v1:r[0], v2:r[1], pts, len, type, p1, p2, curve: cv });
+  }
+
+  // Faces
+  const faces = []; let unsupported = 0;
+  Object.entries(E).forEach(([fid,e])=>{
+    if(e.type!=='ADVANCED_FACE') return;
+    const r = refs(e.args), sid = r[r.length-1], sf = E[sid];
+    if(!sf) return;
+    const sense = flagT(e.args);
+    const face = { id:fid, kind:null, loops:[] };
+    if(sf.type==='PLANE'){
+      const pl = place(refs(sf.args)[0]); if(!pl) return;
+      face.kind='plane'; face.P=pl.loc; face.n = sense ? pl.z : v3.mul(pl.z,-1);
+    }else if(sf.type==='CYLINDRICAL_SURFACE'){
+      const pl = place(refs(sf.args)[0]); if(!pl) return;
+      face.kind='cyl'; face.P=pl.loc; face.a=pl.z; face.r=nums(sf.args).slice(-1)[0]; face.sense=sense;
+    }else{ unsupported++; return; }
+    r.slice(0,-1).forEach(bid=>{
+      const b = E[bid]; if(!b || (b.type!=='FACE_OUTER_BOUND' && b.type!=='FACE_BOUND')) return;
+      const lp = E[refs(b.args)[0]]; if(!lp || lp.type!=='EDGE_LOOP') return;
+      const oes = refs(lp.args).map(oid=>{ const oe = E[oid]; if(!oe) return null; return { edge: refs(oe.args)[0], ori: flagT(oe.args) }; }).filter(Boolean);
+      face.loops.push({ outer: b.type==='FACE_OUTER_BOUND', oes });
+    });
+    faces.push(face);
+  });
+  if(!faces.length) throw new Error("Aucune face exploitable dans ce fichier STEP.");
+  if(unsupported) throw new Error(`Cette pièce contient ${unsupported} face(s) à surface gauche (B-spline, cône, tore…) : c'est une pièce emboutie / formée, son développé ne peut pas être calculé automatiquement. Utilise le DXF du développé.`);
+
+  // Adjacence arête → faces
+  const edgeFaces = {};
+  faces.forEach((f,fi)=> f.loops.forEach(l=> l.oes.forEach(o=>{ (edgeFaces[o.edge] = edgeFaces[o.edge]||[]).push(fi); })));
+
+  // Points d'une boucle (dans le sens de parcours)
+  function loopPts(l){
+    const out = [];
+    l.oes.forEach(o=>{
+      const ei = edgeInfo(o.edge); const p = o.ori ? ei.pts : ei.pts.slice().reverse();
+      p.forEach((q,i)=>{ if(out.length && i===0) return; out.push(q); });
+    });
+    return out;
+  }
+  const newell = pts=>{ let n=[0,0,0]; for(let i=0;i<pts.length;i++){ const a=pts[i], b=pts[(i+1)%pts.length]; n=v3.add(n, v3.cross(a,b)); } return n; };
+  faces.forEach(f=>{ if(f.kind==='plane'){ f.loops.forEach(l=>{ l.pts = loopPts(l); }); const o = f.loops.find(l=>l.outer)||f.loops[0]; f.area = o ? v3.len(newell(o.pts))/2 : 0; f.loops.forEach(l=>{ if(l!==o) f.area -= v3.len(newell(l.pts))/2; }); } });
+
+  const planes = faces.map((f,i)=>i).filter(i=>faces[i].kind==='plane');
+  if(!planes.length) throw new Error('Aucune face plane trouvée.');
+  const cyls = faces.map((f,i)=>i).filter(i=>faces[i].kind==='cyl');
+
+  // Épaisseur : écart de rayon entre cylindres coaxiaux, sinon distance entre les deux grandes faces planes opposées
+  const distLine = (p,P,d)=>{ const w=v3.sub(p,P); return v3.len(v3.sub(w, v3.mul(d, v3.dot(w,d)))); };
+  const gaps = [];
+  cyls.forEach(i=>cyls.forEach(j=>{
+    if(i>=j) return; const A=faces[i], B=faces[j];
+    if(Math.abs(v3.dot(A.a,B.a))>0.9999 && distLine(B.P,A.P,A.a)<0.05){ const g=Math.abs(A.r-B.r); if(g>0.05) gaps.push(Math.round(g*1000)/1000); }
+  }));
+  let thickness = null;
+  if(gaps.length){
+    const cnt = {}; gaps.forEach(g=>cnt[g]=(cnt[g]||0)+1);
+    thickness = parseFloat(Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]||a-b)[0]);
+  }
+  const root = planes.slice().sort((a,b)=>faces[b].area-faces[a].area)[0];
+  if(thickness==null){
+    const R0 = faces[root]; let best = null;
+    planes.forEach(i=>{ const f=faces[i]; if(i===root || v3.dot(f.n,R0.n)>-0.9999) return; const d=Math.abs(v3.dot(v3.sub(f.P,R0.P),R0.n)); if(d>0.05 && (!best || f.area>best.area)) best={area:f.area,d}; });
+    if(best) thickness = Math.round(best.d*1000)/1000;
+  }
+  if(!thickness) throw new Error("Épaisseur de tôle introuvable dans ce fichier STEP.");
+
+  return { faces, edgeFaces, edgeInfo, loopPts, planes, cyls, root, thickness, distLine, newell };
+}
+
+function stepSheetUnfold(M, K){
+  const { faces, edgeFaces, edgeInfo, root, thickness:t, distLine, cyls } = M;
+  const visited = {}, maps = {}, bends = [];
+  const usedEdge = {}; // arêtes partagées avec un pli utilisé (non découpées)
+  visited[root] = true; maps[root] = m3.identity();
+  const queue = [root];
+  const warnings = [];
+  while(queue.length){
+    const fi = queue.shift(), F = faces[fi];
+    F.loops.forEach(l=> l.oes.forEach(o=>{
+      const ei = edgeInfo(o.edge); if(ei.type!=='LINE') return;
+      (edgeFaces[o.edge]||[]).forEach(ci=>{
+        const C = faces[ci]; if(C.kind!=='cyl') return;
+        if(Math.abs(v3.dot(C.a, F.n))>1e-3) return; // l'axe du pli doit être dans le plan de la face
+        const dir = v3.unit(v3.sub(ei.p2,ei.p1)); if(Math.abs(v3.dot(dir,C.a))<0.999) return;
+        // autre arête rectiligne du pli, rattachée à une autre face plane
+        let other = null;
+        C.loops.forEach(cl=>cl.oes.forEach(co=>{
+          if(co.edge===o.edge || other) return; const ce = edgeInfo(co.edge); if(ce.type!=='LINE') return;
+          const cd = v3.unit(v3.sub(ce.p2,ce.p1)); if(Math.abs(v3.dot(cd,C.a))<0.999) return;
+          const g = (edgeFaces[co.edge]||[]).find(x=>x!==ci && x!==fi && faces[x].kind==='plane' && Math.abs(v3.dot(C.a,faces[x].n))<1e-3);
+          if(g!==undefined) other = { edge:co.edge, face:g, info:ce };
+        }));
+        if(!other || visited[other.face]) { if(other && visited[other.face]) usedEdge[o.edge] = true; return; }
+        const G = faces[other.face];
+        // Plis : rayon neutre
+        const partner = cyls.map(i=>faces[i]).find(X=>X!==C && Math.abs(v3.dot(X.a,C.a))>0.9999 && distLine(X.P,C.P,C.a)<0.05 && Math.abs(Math.abs(X.r-C.r)-t)<0.05);
+        const isInner = partner ? (C.r < partner.r) : !C.sense;
+        const rn = isInner ? C.r + K*t : C.r - (1-K)*t;
+        const theta = Math.acos(Math.max(-1,Math.min(1,v3.dot(F.n,G.n))));
+        const BA = rn*theta;
+        const a = v3.unit(C.a);
+        const Mp = maps[fi];
+        // sens de rotation qui rend le plan de G parallèle à celui de F
+        let best = null;
+        [theta,-theta].forEach(phi=>{ const Rt = m3.rotAxis(a, other.info.p1, phi); const nn = m3.applyR(Rt, G.n); const sc = v3.dot(nn,F.n); if(!best || sc>best.sc) best={phi,Rt,sc}; });
+        // direction (dans le plan de F, ⟂ axe) qui s'éloigne de F
+        let u = v3.unit(v3.cross(a, F.n));
+        const outer = F.loops.find(x=>x.outer)||F.loops[0];
+        const cen = outer.pts.reduce((s,p)=>v3.add(s,p),[0,0,0]).map(x=>x/outer.pts.length);
+        if(v3.dot(v3.sub(ei.p1,cen),u)<0) u = v3.mul(u,-1);
+        const q = other.info.p1;
+        const s = v3.dot(v3.sub(q,ei.p1),a);
+        const T = v3.add(v3.add(ei.p1, v3.mul(a,s)), v3.mul(u,BA));
+        const tv = v3.sub(T,q);
+        const Tc = { R:best.Rt.R, t:v3.add(best.Rt.t, tv) };
+        maps[other.face] = m3.compose(Mp, Tc);
+        visited[other.face] = true; queue.push(other.face);
+        usedEdge[o.edge] = true; usedEdge[other.edge] = true;
+        bends.push({ cyl:ci, from:fi, to:other.face, Lp:ei, Lc:other.info, theta, deg:theta*180/Math.PI, rInt: isInner?C.r:C.r-t, BA, width: ei.len, MpIdx:fi });
+        // cylindre rempli : ses autres arêtes (arcs latéraux) ne sont pas "découpes" des faces planes
+      });
+    }));
+  }
+  const reached = Object.keys(visited).map(Number);
+  // Repère 2D : axe X le long de la plus longue arête rectiligne de la face de départ
+  const R0 = faces[root]; let ex = null, bestLen = -1;
+  R0.loops.forEach(l=>l.oes.forEach(o=>{ const e = edgeInfo(o.edge); if(e.type==='LINE' && e.len>bestLen){ bestLen=e.len; ex = v3.unit(v3.sub(e.p2,e.p1)); } }));
+  if(!ex){ const tt = Math.abs(R0.n[2])<0.9?[0,0,1]:[1,0,0]; ex = v3.unit(v3.cross(R0.n,tt)); }
+  ex = v3.unit(v3.sub(ex, v3.mul(R0.n, v3.dot(ex,R0.n))));
+  const ey = v3.cross(R0.n, ex), o0 = R0.P;
+  const to2 = (fi,p)=>{ const q = m3.apply(maps[fi],p); const w = v3.sub(q,o0); return { x:v3.dot(w,ex), y:v3.dot(w,ey) }; };
+
+  const entities = [], polys = [], strips = [];
+  let totalLength = 0, pierces = 1, areaNet = 0;
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  const bb = p=>{ if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x; if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y; };
+  const shoe = pts=>{ let s=0; for(let i=0;i<pts.length;i++){ const a=pts[i], b=pts[(i+1)%pts.length]; s+=a.x*b.y-b.x*a.y; } return Math.abs(s)/2; };
+  reached.forEach(fi=>{
+    const F = faces[fi]; const poly = { outer:null, holes:[] };
+    F.loops.forEach(l=>{
+      const pts2 = l.pts.map(p=>to2(fi,p)); pts2.forEach(bb);
+      if(l.outer || (!poly.outer && l===F.loops[0])) poly.outer = pts2; else { poly.holes.push(pts2); pierces++; }
+      l.oes.forEach(o=>{
+        if(usedEdge[o.edge]) return; // arête de pli : pas de découpe
+        const ei = edgeInfo(o.edge);
+        const pts = ei.pts.map(p=>to2(fi,p));
+        entities.push({ type:'LWPOLYLINE', vertices:pts, shape:false });
+        totalLength += ei.len;
+      });
+    });
+    if(poly.outer){ polys.push(poly); areaNet += shoe(poly.outer) - poly.holes.reduce((s,h)=>s+shoe(h),0); }
+  });
+  bends.forEach(b=>{
+    const a = v3.unit(faces[b.cyl].a);
+    const axial = p=>v3.dot(p,a);
+    const [A1,A2] = axial(b.Lp.p1)<=axial(b.Lp.p2) ? [b.Lp.p1,b.Lp.p2] : [b.Lp.p2,b.Lp.p1];
+    const [B1,B2] = axial(b.Lc.p1)<=axial(b.Lc.p2) ? [b.Lc.p1,b.Lc.p2] : [b.Lc.p2,b.Lc.p1];
+    const a1 = to2(b.from,A1), a2 = to2(b.from,A2), b1 = to2(b.to,B1), b2 = to2(b.to,B2);
+    [a1,a2,b1,b2].forEach(bb);
+    strips.push([a1,a2,b2,b1]);
+    entities.push({ type:'LINE', vertices:[a1,b1] }); entities.push({ type:'LINE', vertices:[a2,b2] });
+    totalLength += 2*b.BA;
+    areaNet += b.BA*b.width;
+  });
+  const bbox = { minX,minY,maxX,maxY };
+  return {
+    totalLength, pierces, entities, bbox,
+    netArea: { net: areaNet, bb: bbox, faces: polys, strips, outerPts:null, holePts:[] },
+    step: { thickness:t, K, bends: bends.map(b=>({ deg:b.deg, rInt:b.rInt, BA:b.BA, width:b.width })), flats: reached.length, warnings }
+  };
+}
+
 
 function analyzeDxfForLaser(text){
   const parser = new DxfParser();
@@ -2326,7 +2600,9 @@ function buildChuteSvg(na){
   const pad = Math.max(w,h)*0.03;
   const pt = q=> `${(q.x-bb.minX).toFixed(2)},${(bb.maxY-q.y).toFixed(2)}`; // Y inversé
   const path = pts=> 'M'+pts.map(pt).join('L')+'Z';
-  const d = path(na.outerPts) + na.holePts.map(path).join('');
+  const d = na.faces
+    ? na.faces.map(f=> path(f.outer) + f.holes.map(path).join('')).join('') + (na.strips||[]).map(path).join('')
+    : path(na.outerPts) + na.holePts.map(path).join('');
   return `<svg viewBox="${-pad} ${-pad} ${w+2*pad} ${h+2*pad}" style="width:100%;max-width:760px;height:auto;display:block;" xmlns="http://www.w3.org/2000/svg">
     <defs><pattern id="chute-hatch" width="${Math.max(w,h)/60}" height="${Math.max(w,h)/60}" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="${Math.max(w,h)/60}" stroke="#c0392b" stroke-width="${Math.max(w,h)/600}" opacity=".55"/></pattern></defs>
     <rect x="0" y="0" width="${w}" height="${h}" fill="url(#chute-hatch)" stroke="#c0392b" stroke-width="${Math.max(w,h)/500}" stroke-dasharray="${Math.max(w,h)/100}"/>
@@ -2557,16 +2833,23 @@ function renderDecoupeLaser(){
       <div>
         <div class="eyebrow">Découpe</div>
         <h1>Découpe laser</h1>
-        <div class="lede">Charge un fichier DXF pour estimer la longueur de coupe, le nombre de perçages et le temps de découpe.</div>
+        <div class="lede">Charge un fichier DXF — ou un STEP de pièce pliée, dont le développé est calculé automatiquement — pour estimer la longueur de coupe, le nombre de perçages et le temps de découpe.</div>
       </div>
     </header>
 
     <div class="modal" style="max-width:640px;margin:0 0 24px;box-shadow:none;">
       <div class="field">
-        <label>Fichier DXF</label>
-        <input type="file" id="laser-file" accept=".dxf">
+        <label>Fichier DXF ou STEP (pièce pliée)</label>
+        <input type="file" id="laser-file" accept=".dxf,.step,.stp">
         ${laserFileName ? `<span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Fichier chargé : ${escapeHtml(laserFileName)}</span>` : ''}
       </div>
+      ${laserResult && laserResult.step ? `
+      <div style="border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 16px;background:var(--bg);font-size:13px;">
+        <div style="font-weight:600;margin-bottom:6px;">Développé calculé depuis le STEP</div>
+        <div style="color:var(--ink-dim);line-height:1.6;">Épaisseur lue : <b style="color:var(--ink);">${String(laserResult.step.thickness).replace('.',',')} mm</b> · ${laserResult.step.bends.length} pli${laserResult.step.bends.length>1?'s':''}${laserResult.step.bends.length ? ' (' + laserResult.step.bends.map(b=>Math.round(b.deg)+'° R'+(Math.round(b.rInt*10)/10)).join(', ') + ')' : ''} · développé ${(laserResult.bbox.maxX-laserResult.bbox.minX).toFixed(1).replace('.',',')} × ${(laserResult.bbox.maxY-laserResult.bbox.minY).toFixed(1).replace('.',',')} mm</div>
+        <div class="field" style="margin:10px 0 0;max-width:260px;"><label>Facteur K (pli)</label><input type="number" id="laser-k" step="0.01" min="0" max="0.5" value="${laserStepK}"></div>
+        <div style="color:var(--ink-dim);font-size:11px;margin-top:6px;">Longueur de pli à plat = (rayon intérieur + K × épaisseur) × angle. K ≈ 0,33 à 0,45 selon la matière et l'outil de pliage.</div>
+      </div>` : ''}
 
       <div class="grid2">
         <div class="field">
@@ -2651,7 +2934,7 @@ function renderDecoupeLaser(){
         <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:22px 0 10px;color:var(--ink-dim);">Enregistrer dans le suivi des découpes</h3>
         <div class="grid2">
           <div class="field"><label>Temps réel mesuré pour le lot (min) — vide si pas encore découpé</label><input type="number" step="0.1" min="0" id="laser-hist-reel"></div>
-          <div class="field"><label>Pièce / repère</label><input type="text" id="laser-hist-piece" value="${escapeHtml(laserDevis.reference || (laserFileName||'').replace(/\.dxf$/i,''))}"></div>
+          <div class="field"><label>Pièce / repère</label><input type="text" id="laser-hist-piece" value="${escapeHtml(laserDevis.reference || (laserFileName||'').replace(/\.(dxf|step|stp)$/i,''))}"></div>
         </div>
         <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="laser-hist-save">Enregistrer dans le suivi</button></div>
         <div style="font-size:12px;color:var(--ink-dim);margin-top:6px;">Tu peux enregistrer le temps estimé dès le devis, puis renseigner ou corriger le temps réel après la commande dans l'onglet « Suivi des découpes ».</div>
@@ -2707,7 +2990,7 @@ function renderDecoupeLaser(){
       const dv = laserDevisCompute(calc);
       const blob = new Blob(['\ufeff'+laserDevisCsv(dv)], { type:'text/csv;charset=utf-8' });
       const a = document.createElement('a');
-      const nom = (laserDevis.reference || (laserFileName||'devis').replace(/\.dxf$/i,'')).replace(/[^\w\-]+/g,'_');
+      const nom = (laserDevis.reference || (laserFileName||'devis').replace(/\.(dxf|step|stp)$/i,'')).replace(/[^\w\-]+/g,'_');
       a.href = URL.createObjectURL(blob); a.download = `devis-laser-${nom}.csv`; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
     };
@@ -2741,16 +3024,36 @@ function renderDecoupeLaser(){
     if(!file) return;
     try{
       const text = await file.text();
-      laserResult = analyzeDxfForLaser(text);
+      const isStep = /\.(step|stp)$/i.test(file.name);
+      if(isStep){
+        laserStepModel = stepSheetParse(text);
+        laserResult = stepSheetUnfold(laserStepModel, laserStepK);
+        // épaisseur : on prend l'épaisseur du tableau de vitesses la plus proche de celle du STEP
+        const keys = Object.keys(LASER_PRESETS[laserParams.matiere]||{}).map(Number);
+        if(keys.length){
+          const near = keys.reduce((bst,k)=> Math.abs(k-laserResult.step.thickness) < Math.abs(bst-laserResult.step.thickness) ? k : bst, keys[0]);
+          laserParams.epaisseur = near; laserParams.vitesse = LASER_PRESETS[laserParams.matiere][near];
+        }
+      }else{
+        laserStepModel = null;
+        laserResult = analyzeDxfForLaser(text);
+      }
       laserFileName = file.name;
       laserDevis.prixKgMatiere = null;
-      laserDevis.reference = file.name.replace(/\.dxf$/i,'');
-      toast('Fichier DXF analysé');
+      laserDevis.reference = file.name.replace(/\.(dxf|step|stp)$/i,'');
+      toast(isStep ? 'STEP déplié : développé calculé' : 'Fichier DXF analysé');
       renderDecoupeLaser();
     }catch(err){
       console.error(err);
       toast('Impossible de lire ce fichier : ' + err.message);
     }
+  };
+  const laserK = document.getElementById('laser-k');
+  if(laserK) laserK.onchange = ()=>{
+    const k = parseFloat(laserK.value);
+    laserStepK = (k>=0 && k<=0.5) ? k : 0.4;
+    try{ laserResult = stepSheetUnfold(laserStepModel, laserStepK); }catch(err){ toast('Recalcul impossible : '+err.message); }
+    renderDecoupeLaser();
   };
 }
 
