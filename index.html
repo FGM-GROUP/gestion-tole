@@ -407,9 +407,11 @@ let currentTab = 'inventaire';
    v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
-   v4.9 Découpe laser : lecture STEP (plis interrompus, courbes B-spline rectilignes, orientation au plus petit rectangle), de tôle pliée avec calcul du développé (facteur K) ; Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
-const APP_VERSION = '4.9';
-const APP_VERSION_DATE = '13/11/2026';
+   v4.9 (13/11) Devis laser : surface réelle du contour, emprise des arcs corrigée, détail de la ligne matière, taux laser 150 €/h ; Imbrication : retrait de pièces, plusieurs fichiers, tôles supplémentaires automatiques
+   v5.1 (19/11) STEP à plusieurs pièces (sélection ou somme), épaisseur lue sur la face opposée, K par défaut 0,35 validé sur un plan CATIA
+   v5.0 (19/11) Nouvel onglet Cintrage « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) */
+const APP_VERSION = '5.1';
+const APP_VERSION_DATE = '19/11/2026';
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -2186,7 +2188,9 @@ let laserParams = { vitesse: 3000, tempsPercage: 0.5, vitesseRapide: 15000, mati
 let laserResult = null;
 let laserFileName = '';
 let laserStepModel = null; // topologie du STEP chargé (pour recalculer le développé quand K change)
-let laserStepK = 0.4;
+let laserStepK = 0.35; // calibré sur un plan CATIA (développés à 0,1 mm près)
+let laserStepResults = []; // un développé par pièce du STEP
+let laserStepSel = 'all'; // pièce affichée : indice ou 'all'
 
 const LASER_PRESETS = {
   'Acier':      { 1: 6000, 2: 4000, 3: 3000, 5: 1800, 8: 1000 },
@@ -2404,32 +2408,45 @@ function stepSheetParse(text){
   const newell = pts=>{ let n=[0,0,0]; for(let i=0;i<pts.length;i++){ const a=pts[i], b=pts[(i+1)%pts.length]; n=v3.add(n, v3.cross(a,b)); } return n; };
   faces.forEach(f=>{ if(f.kind==='plane'){ f.loops.forEach(l=>{ l.pts = loopPts(l); }); const o = f.loops.find(l=>l.outer)||f.loops[0]; f.area = o ? v3.len(newell(o.pts))/2 : 0; f.loops.forEach(l=>{ if(l!==o) f.area -= v3.len(newell(l.pts))/2; }); } });
 
-  const planes = faces.map((f,i)=>i).filter(i=>faces[i].kind==='plane');
+  const distLine = (p,P,d)=>{ const w=v3.sub(p,P); return v3.len(v3.sub(w, v3.mul(d, v3.dot(w,d)))); };
+  // Solides du fichier (une pièce = un MANIFOLD_SOLID_BREP) ; sans solide déclaré, tout est une seule pièce
+  const faceSolid = {}; const solidDefs = [];
+  Object.values(E).forEach(e=>{
+    if(e.type!=='MANIFOLD_SOLID_BREP') return;
+    const shell = E[refs(e.args)[0]]; if(!shell) return;
+    const idx = solidDefs.length; solidDefs.push({ name:(/^\s*'([^']*)'/.exec(e.args)||[])[1]||'' });
+    refs(shell.args).forEach(fid=>{ faceSolid[fid] = idx; });
+  });
+  const groups = solidDefs.length ? solidDefs.map(()=>[]) : [[]];
+  faces.forEach((f,i)=>{ const si = solidDefs.length ? (faceSolid[f.id]!==undefined ? faceSolid[f.id] : -1) : 0; if(si>=0) groups[si].push(i); });
+  function prep(idxs){
+  const planes = idxs.filter(i=>faces[i].kind==='plane');
   if(!planes.length) throw new Error('Aucune face plane trouvée.');
-  const cyls = faces.map((f,i)=>i).filter(i=>faces[i].kind==='cyl');
+  const cyls = idxs.filter(i=>faces[i].kind==='cyl');
 
   // Épaisseur : écart de rayon entre cylindres coaxiaux, sinon distance entre les deux grandes faces planes opposées
-  const distLine = (p,P,d)=>{ const w=v3.sub(p,P); return v3.len(v3.sub(w, v3.mul(d, v3.dot(w,d)))); };
   const gaps = [];
   cyls.forEach(i=>cyls.forEach(j=>{
     if(i>=j) return; const A=faces[i], B=faces[j];
     if(Math.abs(v3.dot(A.a,B.a))>0.9999 && distLine(B.P,A.P,A.a)<0.05){ const g=Math.abs(A.r-B.r); if(g>0.05) gaps.push(Math.round(g*1000)/1000); }
   }));
   let thickness = null;
-  if(gaps.length){
-    const cnt = {}; gaps.forEach(g=>cnt[g]=(cnt[g]||0)+1);
-    thickness = parseFloat(Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]||a-b)[0]);
-  }
   const root = planes.slice().sort((a,b)=>faces[b].area-faces[a].area)[0];
-  if(thickness==null){
+  // 1) distance entre la plus grande face plane et sa face opposée (la plus grande face antiparallèle)
+  {
     const R0 = faces[root]; let best = null;
     planes.forEach(i=>{ const f=faces[i]; if(i===root || v3.dot(f.n,R0.n)>-0.9999) return; const d=Math.abs(v3.dot(v3.sub(f.P,R0.P),R0.n)); if(d>0.05 && (!best || f.area>best.area)) best={area:f.area,d}; });
     if(best) thickness = Math.round(best.d*1000)/1000;
   }
+  // 2) à défaut : écart de rayon le plus fréquent entre cylindres coaxiaux (peut être faussé par les perçages)
+  if(thickness==null && gaps.length){
+    const cnt = {}; gaps.forEach(g=>cnt[g]=(cnt[g]||0)+1);
+    thickness = parseFloat(Object.keys(cnt).sort((a,b)=>cnt[b]-cnt[a]||a-b)[0]);
+  }
   if(!thickness) throw new Error("Épaisseur de tôle introuvable dans ce fichier STEP.");
   // Faces à surface gauche : tolérées si ce sont de petites bandes de chant (suivent une découpe courbe), refusées si elles sont grandes (plis/bossages non dépliables)
   let bigOthers = 0;
-  faces.forEach(f=>{
+  idxs.map(i=>faces[i]).forEach(f=>{
     if(f.kind!=='other') return;
     const pts = []; f.loops.forEach(l=>l.oes.forEach(o=>{ const e = edgeInfo(o.edge); if(e.p1) pts.push(e.p1); if(e.p2) pts.push(e.p2); }));
     let diag = 0; for(let i=0;i<pts.length;i++) for(let j=i+1;j<pts.length;j++){ const d = v3.len(v3.sub(pts[i],pts[j])); if(d>diag) diag=d; }
@@ -2437,11 +2454,23 @@ function stepSheetParse(text){
   });
   if(bigOthers) throw new Error(`Ce STEP contient ${bigOthers} grande(s) face(s) à surface gauche (B-spline, sphère, cône, tore…) en plus des plans et cylindres : congés d'angle, raccords de pli ou bossages. Le dépliage automatique ne gère que les plans et les plis cylindriques ; utilise le DXF du développé exporté de ta CAO (fonction « mise à plat »).`);
 
-  return { faces, edgeFaces, edgeInfo, loopPts, planes, cyls, root, thickness, distLine, newell };
+    return { root, thickness, planes, cyls };
+  }
+  const solids = [];
+  groups.forEach((idxs,gi)=>{
+    if(!idxs.length) return;
+    try{ const sp = prep(idxs); sp.name = (solidDefs[gi]&&solidDefs[gi].name) || ''; sp.faceIdx = idxs; solids.push(sp); }
+    catch(err){ solids.push({ error: err.message, name:(solidDefs[gi]&&solidDefs[gi].name)||'', faceIdx:idxs }); }
+  });
+  if(!solids.some(x=>!x.error)) throw new Error(solids[0].error);
+  return { faces, edgeFaces, edgeInfo, loopPts, solids, distLine, newell };
 }
 
-function stepSheetUnfold(M, K){
-  const { faces, edgeFaces, edgeInfo, root, thickness:t, distLine, cyls } = M;
+function stepSheetUnfold(M, K, si){
+  const S = M.solids[si||0];
+  if(S.error) throw new Error(S.error);
+  const { faces, edgeFaces, edgeInfo, distLine } = M;
+  const { root, thickness:t, cyls } = S;
   const visited = {}, maps = {}, bends = [];
   const usedEdge = {}; // arêtes partagées avec un pli utilisé (non découpées)
   const bendDone = {}; // plis (cylindres) déjà traités
@@ -2570,6 +2599,26 @@ function stepSheetUnfold(M, K){
   };
 }
 
+
+/* Plusieurs pièces dans un même STEP : on les dispose côte à côte (somme des longueurs, perçages et surfaces) */
+function stepSheetCombine(rs){
+  let off = 0, maxH = 0, totalLength = 0, pierces = 0, net = 0;
+  const entities = [], faces = [], strips = [], bends = []; let flats = 0;
+  rs.forEach(r=>{
+    const dx = off - r.bbox.minX, dy = -r.bbox.minY;
+    const mv = p=>({ x:p.x+dx, y:p.y+dy });
+    r.entities.forEach(e=> entities.push({ ...e, vertices: e.vertices.map(mv) }));
+    r.netArea.faces.forEach(f=> faces.push({ outer:f.outer.map(mv), holes:f.holes.map(h=>h.map(mv)) }));
+    r.netArea.strips.forEach(st=> strips.push(st.map(mv)));
+    off += (r.bbox.maxX-r.bbox.minX) + 20; maxH = Math.max(maxH, r.bbox.maxY-r.bbox.minY);
+    totalLength += r.totalLength; pierces += r.pierces; net += r.netArea.net;
+    r.step.bends.forEach(b=>bends.push(b)); flats += r.step.flats;
+  });
+  const bbox = { minX:0, minY:0, maxX:off-20, maxY:maxH };
+  return { totalLength, pierces, entities, bbox,
+    netArea:{ net, bb:bbox, faces, strips, outerPts:null, holePts:[] },
+    step:{ thickness: Math.max(...rs.map(r=>r.step.thickness)), thicknesses: rs.map(r=>r.step.thickness), K: rs[0].step.K, bends, flats, pieces: rs.length, warnings:[] } };
+}
 
 function analyzeDxfForLaser(text){
   const parser = new DxfParser();
@@ -2868,6 +2917,16 @@ function laserDevisCsv(dv){
   return [cols.map(esc).join(';')].concat(rows.map(r=>r.map(esc).join(';'))).join('\r\n');
 }
 
+function laserStepBuild(){
+  const M = laserStepModel;
+  laserStepResults = M.solids.map((S,i)=>{ try{ return stepSheetUnfold(M, laserStepK, i); }catch(err){ return { error: err.message }; } });
+  const okIdx = laserStepResults.map((r,i)=>r.error?-1:i).filter(i=>i>=0);
+  if(!okIdx.length) throw new Error(laserStepResults[0].error);
+  if(laserStepSel!=='all' && (laserStepSel>=laserStepResults.length || laserStepResults[laserStepSel].error)) laserStepSel = okIdx.length>1 ? 'all' : okIdx[0];
+  if(okIdx.length===1) laserStepSel = okIdx[0];
+  laserResult = laserStepSel==='all' ? stepSheetCombine(okIdx.map(i=>laserStepResults[i])) : laserStepResults[laserStepSel];
+}
+
 function renderDecoupeLaser(){
   const view = document.getElementById('view');
   const calc = laserCompute();
@@ -2890,6 +2949,11 @@ function renderDecoupeLaser(){
       <div style="border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 16px;background:var(--bg);font-size:13px;">
         <div style="font-weight:600;margin-bottom:6px;">Développé calculé depuis le STEP</div>
         <div style="color:var(--ink-dim);line-height:1.6;">Épaisseur lue : <b style="color:var(--ink);">${String(laserResult.step.thickness).replace('.',',')} mm</b> · ${laserResult.step.bends.length} pli${laserResult.step.bends.length>1?'s':''}${laserResult.step.bends.length ? ' (' + laserResult.step.bends.map(b=>Math.round(b.deg)+'° R'+(Math.round(b.rInt*10)/10)).join(', ') + ')' : ''} · développé ${(laserResult.bbox.maxX-laserResult.bbox.minX).toFixed(1).replace('.',',')} × ${(laserResult.bbox.maxY-laserResult.bbox.minY).toFixed(1).replace('.',',')} mm</div>
+        ${laserStepResults.length>1 ? `<div class="field" style="margin:10px 0 0;max-width:420px;"><label>Pièce du fichier (${laserStepResults.length} pièces)</label><select id="laser-piece">
+          <option value="all" ${laserStepSel==='all'?'selected':''}>Toutes les pièces (somme)</option>
+          ${laserStepResults.map((r,i)=> r.error ? `<option value="${i}" disabled>Pièce ${i+1} — non dépliable</option>` : `<option value="${i}" ${laserStepSel===i?'selected':''}>Pièce ${i+1} — ${(r.bbox.maxX-r.bbox.minX).toFixed(1).replace('.',',')} × ${(r.bbox.maxY-r.bbox.minY).toFixed(1).replace('.',',')} mm, ép. ${r.step.thickness} mm</option>`).join('')}
+        </select></div>
+        ${laserStepResults.some(r=>r.error) ? `<div style="color:var(--danger);font-size:12px;margin-top:6px;">${laserStepResults.map((r,i)=>r.error?'Pièce '+(i+1)+' : '+escapeHtml(r.error):'').filter(Boolean).join('<br>')}</div>` : ''}` : ''}
         <div class="field" style="margin:10px 0 0;max-width:260px;"><label>Facteur K (pli)</label><input type="number" id="laser-k" step="0.01" min="0" max="0.5" value="${laserStepK}"></div>
         <div style="color:var(--ink-dim);font-size:11px;margin-top:6px;">Longueur de pli à plat = (rayon intérieur + K × épaisseur) × angle. K ≈ 0,33 à 0,45 selon la matière et l'outil de pliage.</div>
       </div>` : ''}
@@ -2968,7 +3032,7 @@ function renderDecoupeLaser(){
           </table>
         </div>
         <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 12px;">Soit <b style="color:var(--ink);">${eur(dv.prixPiece)}</b> la pièce (frais fixes répartis sur ${dv.qte}). Matière calculée sur ${dv.useReelle?'la surface réelle':'le rectangle englobant'} (rectangle ${dv.largeur.toFixed(1)}×${dv.hauteur.toFixed(1)} mm ; ${dv.poidsUnit.toFixed(3)} kg/pièce) ; temps de découpe ${dv.tempsUnitMin.toFixed(2)} min/pièce${dv.corrige?' (corrigé d\'après ton historique)':' (estimation)'}. Les montants par défaut sont modifiables.</div>
-        ${laserResult.netArea ? `<h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 8px;color:var(--ink-dim);">Pièce et chute dans le rectangle</h3>
+        ${laserResult.netArea && !(laserResult.step && laserResult.step.pieces>1) ? `<h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:18px 0 8px;color:var(--ink-dim);">Pièce et chute dans le rectangle</h3>
         <div style="border:1px solid var(--line);border-radius:var(--radius);padding:10px;background:var(--bg);">${buildChuteSvg(laserResult.netArea)}</div>
         <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 14px;"><span style="display:inline-block;width:10px;height:10px;background:#7fb7d9;border:1px solid #1f5f8b;vertical-align:middle;"></span> Pièce ${(dv.surfReelle/100).toFixed(1).replace('.',',')} cm² (${(100*dv.surfReelle/dv.surfRect).toFixed(1).replace('.',',')} %) · <span style="display:inline-block;width:10px;height:10px;background:repeating-linear-gradient(45deg,#c0392b55,#c0392b55 2px,transparent 2px,transparent 4px);border:1px dashed #c0392b;vertical-align:middle;"></span> Chute ${(dv.chute/100).toFixed(1).replace('.',',')} cm² (${(100*dv.chute/dv.surfRect).toFixed(1).replace('.',',')} %) · Rectangle exact ${dv.largeur.toFixed(1).replace('.',',')} × ${dv.hauteur.toFixed(1).replace('.',',')} mm</div>` : ''}
         <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="ld-csv">Exporter le devis en CSV</button></div>`;
@@ -3070,7 +3134,8 @@ function renderDecoupeLaser(){
       const isStep = /\.(step|stp)$/i.test(file.name);
       if(isStep){
         laserStepModel = stepSheetParse(text);
-        laserResult = stepSheetUnfold(laserStepModel, laserStepK);
+        laserStepSel = 'all';
+        laserStepBuild();
         // épaisseur : on prend l'épaisseur du tableau de vitesses la plus proche de celle du STEP
         const keys = Object.keys(LASER_PRESETS[laserParams.matiere]||{}).map(Number);
         if(keys.length){
@@ -3091,11 +3156,13 @@ function renderDecoupeLaser(){
       toast('Impossible de lire ce fichier : ' + err.message);
     }
   };
+  const laserPiece = document.getElementById('laser-piece');
+  if(laserPiece) laserPiece.onchange = ()=>{ laserStepSel = laserPiece.value==='all' ? 'all' : parseInt(laserPiece.value,10); try{ laserStepBuild(); }catch(err){ toast(err.message); } renderDecoupeLaser(); };
   const laserK = document.getElementById('laser-k');
   if(laserK) laserK.onchange = ()=>{
     const k = parseFloat(laserK.value);
-    laserStepK = (k>=0 && k<=0.5) ? k : 0.4;
-    try{ laserResult = stepSheetUnfold(laserStepModel, laserStepK); }catch(err){ toast('Recalcul impossible : '+err.message); }
+    laserStepK = (k>=0 && k<=0.5) ? k : 0.35;
+    try{ laserStepBuild(); }catch(err){ toast('Recalcul impossible : '+err.message); }
     renderDecoupeLaser();
   };
 }
