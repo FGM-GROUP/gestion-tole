@@ -408,9 +408,10 @@ let currentTab = 'inventaire';
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
    v4.9 (13/11) Devis laser : surface réelle du contour, emprise des arcs corrigée, détail de la ligne matière, taux laser 150 €/h ; Imbrication : retrait de pièces, plusieurs fichiers, tôles supplémentaires automatiques
+   v5.2 (19/11) STEP : nombre de plis calculé (plis distincts, pièces cumulées) et affiché dans les résultats
    v5.1 (19/11) STEP à plusieurs pièces (sélection ou somme), épaisseur lue sur la face opposée, K par défaut 0,35 validé sur un plan CATIA
    v5.0 (19/11) Nouvel onglet Cintrage « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) */
-const APP_VERSION = '5.1';
+const APP_VERSION = '5.2';
 const APP_VERSION_DATE = '19/11/2026';
 
 /* ---------------------------------------------------------
@@ -2595,7 +2596,7 @@ function stepSheetUnfold(M, K, si){
   return {
     totalLength, pierces, entities, bbox,
     netArea: { net: areaNet, bb: bbox, faces: polys, strips, outerPts:null, holePts:[] },
-    step: { thickness:t, K, bends: bends.map(b=>({ deg:b.deg, rInt:b.rInt, BA:b.BA, width:b.width })), flats: reached.length, warnings }
+    step: { thickness:t, K, bends: bends.map(b=>({ deg:b.deg, rInt:b.rInt, BA:b.BA, width:b.width })), plis: (function(){ const g={}; bends.forEach(b=>{ const k=Math.min(b.from,b.to)+'-'+Math.max(b.from,b.to); if(!g[k]) g[k]={deg:b.deg,rInt:b.rInt,BA:0,width:0}; g[k].BA=Math.max(g[k].BA,b.BA); g[k].width+=b.width; }); return Object.values(g); })(), flats: reached.length, warnings }
   };
 }
 
@@ -2603,7 +2604,7 @@ function stepSheetUnfold(M, K, si){
 /* Plusieurs pièces dans un même STEP : on les dispose côte à côte (somme des longueurs, perçages et surfaces) */
 function stepSheetCombine(rs){
   let off = 0, maxH = 0, totalLength = 0, pierces = 0, net = 0;
-  const entities = [], faces = [], strips = [], bends = []; let flats = 0;
+  const entities = [], faces = [], strips = [], bends = [], plis = []; let flats = 0;
   rs.forEach(r=>{
     const dx = off - r.bbox.minX, dy = -r.bbox.minY;
     const mv = p=>({ x:p.x+dx, y:p.y+dy });
@@ -2612,12 +2613,12 @@ function stepSheetCombine(rs){
     r.netArea.strips.forEach(st=> strips.push(st.map(mv)));
     off += (r.bbox.maxX-r.bbox.minX) + 20; maxH = Math.max(maxH, r.bbox.maxY-r.bbox.minY);
     totalLength += r.totalLength; pierces += r.pierces; net += r.netArea.net;
-    r.step.bends.forEach(b=>bends.push(b)); flats += r.step.flats;
+    r.step.bends.forEach(b=>bends.push(b)); (r.step.plis||[]).forEach(b=>plis.push(b)); flats += r.step.flats;
   });
   const bbox = { minX:0, minY:0, maxX:off-20, maxY:maxH };
   return { totalLength, pierces, entities, bbox,
     netArea:{ net, bb:bbox, faces, strips, outerPts:null, holePts:[] },
-    step:{ thickness: Math.max(...rs.map(r=>r.step.thickness)), thicknesses: rs.map(r=>r.step.thickness), K: rs[0].step.K, bends, flats, pieces: rs.length, warnings:[] } };
+    step:{ thickness: Math.max(...rs.map(r=>r.step.thickness)), thicknesses: rs.map(r=>r.step.thickness), K: rs[0].step.K, bends, plis, flats, pieces: rs.length, warnings:[] } };
 }
 
 function analyzeDxfForLaser(text){
@@ -2948,7 +2949,7 @@ function renderDecoupeLaser(){
       ${laserResult && laserResult.step ? `
       <div style="border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;margin:0 0 16px;background:var(--bg);font-size:13px;">
         <div style="font-weight:600;margin-bottom:6px;">Développé calculé depuis le STEP</div>
-        <div style="color:var(--ink-dim);line-height:1.6;">Épaisseur lue : <b style="color:var(--ink);">${String(laserResult.step.thickness).replace('.',',')} mm</b> · ${laserResult.step.bends.length} pli${laserResult.step.bends.length>1?'s':''}${laserResult.step.bends.length ? ' (' + laserResult.step.bends.map(b=>Math.round(b.deg)+'° R'+(Math.round(b.rInt*10)/10)).join(', ') + ')' : ''} · développé ${(laserResult.bbox.maxX-laserResult.bbox.minX).toFixed(1).replace('.',',')} × ${(laserResult.bbox.maxY-laserResult.bbox.minY).toFixed(1).replace('.',',')} mm</div>
+        <div style="color:var(--ink-dim);line-height:1.6;">Épaisseur lue : <b style="color:var(--ink);">${String(laserResult.step.thickness).replace('.',',')} mm</b> · ${laserResult.step.plis.length} pli${laserResult.step.plis.length>1?'s':''}${laserResult.step.plis.length ? ' (' + laserResult.step.plis.map(b=>Math.round(b.deg)+'° R'+(Math.round(b.rInt*10)/10)).join(', ') + ')' : ''} · développé ${(laserResult.bbox.maxX-laserResult.bbox.minX).toFixed(1).replace('.',',')} × ${(laserResult.bbox.maxY-laserResult.bbox.minY).toFixed(1).replace('.',',')} mm</div>
         ${laserStepResults.length>1 ? `<div class="field" style="margin:10px 0 0;max-width:420px;"><label>Pièce du fichier (${laserStepResults.length} pièces)</label><select id="laser-piece">
           <option value="all" ${laserStepSel==='all'?'selected':''}>Toutes les pièces (somme)</option>
           ${laserStepResults.map((r,i)=> r.error ? `<option value="${i}" disabled>Pièce ${i+1} — non dépliable</option>` : `<option value="${i}" ${laserStepSel===i?'selected':''}>Pièce ${i+1} — ${(r.bbox.maxX-r.bbox.minX).toFixed(1).replace('.',',')} × ${(r.bbox.maxY-r.bbox.minY).toFixed(1).replace('.',',')} mm, ép. ${r.step.thickness} mm</option>`).join('')}
@@ -2984,6 +2985,7 @@ function renderDecoupeLaser(){
         <div class="grid2" style="margin-bottom:16px;">
           <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${(laserResult.totalLength/1000).toFixed(2)} m</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">longueur totale de découpe</div></div>
           <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${laserResult.pierces}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">perçages (nombre de contours)</div></div>
+          ${laserResult.step ? `<div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${laserResult.step.plis.length}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">plis (pliage)</div></div>` : ''}
         </div>
         <div class="grid2" style="margin-bottom:16px;">
           <div class="result-card"><div style="font-family:var(--display);font-size:22px;color:var(--ink);">${fmtMin(calc.tempsCoupeMin)}</div><div style="font-size:12px;color:var(--ink-dim);margin-top:4px;">temps de coupe</div></div>
