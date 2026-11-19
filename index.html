@@ -407,7 +407,7 @@ let currentTab = 'inventaire';
    v4.6 Inventaire pleine largeur d'écran et trié automatiquement par n° de palette
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
-   v4.9 Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) ; Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
+   v4.9 Découpe laser : lecture STEP (plis interrompus, courbes B-spline rectilignes, orientation au plus petit rectangle), de tôle pliée avec calcul du développé (facteur K) ; Cintrage : nouvel onglet « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Imbrication : retrait de pièces (✕ / tout retirer), plusieurs fichiers à la fois, tôles supplémentaires automatiques ; Devis laser : surface réelle du contour (extérieur − trous) pour la matière, emprise des arcs corrigée (le poids/prix matière explosait avec de grands arcs), détail de la ligne matière (poids × €/kg), prix manuel remis à zéro à chaque nouveau DXF, champ vide = prix Paramètres, taux laser 150 €/h */
 const APP_VERSION = '4.9';
 const APP_VERSION_DATE = '13/11/2026';
 
@@ -2351,6 +2351,14 @@ function stepSheetParse(text){
         }
       }
     }
+    if(type==='BSPLINE' && p1 && p2){ // courbe B-spline qui est en réalité une droite (export CAO fréquent) : traitée comme une ligne
+      const dd = v3.sub(p2,p1), cl = v3.len(dd);
+      if(cl>1e-6){
+        const uu = v3.mul(dd,1/cl); let dev = 0;
+        pts.forEach(q=>{ const w=v3.sub(q,p1); dev = Math.max(dev, v3.len(v3.sub(w, v3.mul(uu, v3.dot(w,uu))))); });
+        if(dev<0.01){ type='LINE'; pts=[p1,p2]; len=cl; }
+      }
+    }
     if(len==null){ len = 0; for(let i=0;i<pts.length-1;i++) len += v3.len(v3.sub(pts[i+1],pts[i])); }
     return (edgeCache[id] = { id, v1:r[0], v2:r[1], pts, len, type, p1, p2, curve: cv });
   }
@@ -2369,7 +2377,7 @@ function stepSheetParse(text){
     }else if(sf.type==='CYLINDRICAL_SURFACE'){
       const pl = place(refs(sf.args)[0]); if(!pl) return;
       face.kind='cyl'; face.P=pl.loc; face.a=pl.z; face.r=nums(sf.args).slice(-1)[0]; face.sense=sense;
-    }else{ unsupported++; return; }
+    }else{ face.kind='other'; unsupported++; }
     r.slice(0,-1).forEach(bid=>{
       const b = E[bid]; if(!b || (b.type!=='FACE_OUTER_BOUND' && b.type!=='FACE_BOUND')) return;
       const lp = E[refs(b.args)[0]]; if(!lp || lp.type!=='EDGE_LOOP') return;
@@ -2379,7 +2387,6 @@ function stepSheetParse(text){
     faces.push(face);
   });
   if(!faces.length) throw new Error("Aucune face exploitable dans ce fichier STEP.");
-  if(unsupported) throw new Error(`Cette pièce contient ${unsupported} face(s) à surface gauche (B-spline, cône, tore…) : c'est une pièce emboutie / formée, son développé ne peut pas être calculé automatiquement. Utilise le DXF du développé.`);
 
   // Adjacence arête → faces
   const edgeFaces = {};
@@ -2420,6 +2427,15 @@ function stepSheetParse(text){
     if(best) thickness = Math.round(best.d*1000)/1000;
   }
   if(!thickness) throw new Error("Épaisseur de tôle introuvable dans ce fichier STEP.");
+  // Faces à surface gauche : tolérées si ce sont de petites bandes de chant (suivent une découpe courbe), refusées si elles sont grandes (plis/bossages non dépliables)
+  let bigOthers = 0;
+  faces.forEach(f=>{
+    if(f.kind!=='other') return;
+    const pts = []; f.loops.forEach(l=>l.oes.forEach(o=>{ const e = edgeInfo(o.edge); if(e.p1) pts.push(e.p1); if(e.p2) pts.push(e.p2); }));
+    let diag = 0; for(let i=0;i<pts.length;i++) for(let j=i+1;j<pts.length;j++){ const d = v3.len(v3.sub(pts[i],pts[j])); if(d>diag) diag=d; }
+    if(diag > 6*thickness) bigOthers++;
+  });
+  if(bigOthers) throw new Error(`Ce STEP contient ${bigOthers} grande(s) face(s) à surface gauche (B-spline, sphère, cône, tore…) en plus des plans et cylindres : congés d'angle, raccords de pli ou bossages. Le dépliage automatique ne gère que les plans et les plis cylindriques ; utilise le DXF du développé exporté de ta CAO (fonction « mise à plat »).`);
 
   return { faces, edgeFaces, edgeInfo, loopPts, planes, cyls, root, thickness, distLine, newell };
 }
@@ -2428,6 +2444,7 @@ function stepSheetUnfold(M, K){
   const { faces, edgeFaces, edgeInfo, root, thickness:t, distLine, cyls } = M;
   const visited = {}, maps = {}, bends = [];
   const usedEdge = {}; // arêtes partagées avec un pli utilisé (non découpées)
+  const bendDone = {}; // plis (cylindres) déjà traités
   visited[root] = true; maps[root] = m3.identity();
   const queue = [root];
   const warnings = [];
@@ -2436,7 +2453,7 @@ function stepSheetUnfold(M, K){
     F.loops.forEach(l=> l.oes.forEach(o=>{
       const ei = edgeInfo(o.edge); if(ei.type!=='LINE') return;
       (edgeFaces[o.edge]||[]).forEach(ci=>{
-        const C = faces[ci]; if(C.kind!=='cyl') return;
+        const C = faces[ci]; if(C.kind!=='cyl' || bendDone[ci]) return;
         if(Math.abs(v3.dot(C.a, F.n))>1e-3) return; // l'axe du pli doit être dans le plan de la face
         const dir = v3.unit(v3.sub(ei.p2,ei.p1)); if(Math.abs(v3.dot(dir,C.a))<0.999) return;
         // autre arête rectiligne du pli, rattachée à une autre face plane
@@ -2447,7 +2464,7 @@ function stepSheetUnfold(M, K){
           const g = (edgeFaces[co.edge]||[]).find(x=>x!==ci && x!==fi && faces[x].kind==='plane' && Math.abs(v3.dot(C.a,faces[x].n))<1e-3);
           if(g!==undefined) other = { edge:co.edge, face:g, info:ce };
         }));
-        if(!other || visited[other.face]) { if(other && visited[other.face]) usedEdge[o.edge] = true; return; }
+        if(!other) return;
         const G = faces[other.face];
         // Plis : rayon neutre
         const partner = cyls.map(i=>faces[i]).find(X=>X!==C && Math.abs(v3.dot(X.a,C.a))>0.9999 && distLine(X.P,C.P,C.a)<0.05 && Math.abs(Math.abs(X.r-C.r)-t)<0.05);
@@ -2456,6 +2473,13 @@ function stepSheetUnfold(M, K){
         const theta = Math.acos(Math.max(-1,Math.min(1,v3.dot(F.n,G.n))));
         const BA = rn*theta;
         const a = v3.unit(C.a);
+        if(visited[other.face]){
+          // Pli supplémentaire entre deux faces déjà dépliées (pli interrompu par des dégagements) : on ajoute simplement sa bande
+          bendDone[ci] = true; usedEdge[o.edge] = true; usedEdge[other.edge] = true;
+          bends.push({ cyl:ci, from:fi, to:other.face, Lp:ei, Lc:other.info, theta, deg:theta*180/Math.PI, rInt: isInner?C.r:C.r-t, BA, width: ei.len, extra:true });
+          return;
+        }
+        bendDone[ci] = true;
         const Mp = maps[fi];
         // sens de rotation qui rend le plan de G parallèle à celui de F
         let best = null;
@@ -2484,7 +2508,24 @@ function stepSheetUnfold(M, K){
   R0.loops.forEach(l=>l.oes.forEach(o=>{ const e = edgeInfo(o.edge); if(e.type==='LINE' && e.len>bestLen){ bestLen=e.len; ex = v3.unit(v3.sub(e.p2,e.p1)); } }));
   if(!ex){ const tt = Math.abs(R0.n[2])<0.9?[0,0,1]:[1,0,0]; ex = v3.unit(v3.cross(R0.n,tt)); }
   ex = v3.unit(v3.sub(ex, v3.mul(R0.n, v3.dot(ex,R0.n))));
-  const ey = v3.cross(R0.n, ex), o0 = R0.P;
+  let ey = v3.cross(R0.n, ex);
+  const o0 = R0.P;
+  // Orientation : on tourne le développé pour que son rectangle englobant soit le plus petit possible
+  {
+    const cloud = [];
+    reached.forEach(fi=>{ const F=faces[fi]; const lp = F.loops.find(x=>x.outer)||F.loops[0]; if(lp) lp.pts.forEach(p=>{ const q = m3.apply(maps[fi],p), w = v3.sub(q,o0); cloud.push([v3.dot(w,ex), v3.dot(w,ey)]); }); });
+    let bestA = 0, bestArea = Infinity;
+    for(let deg=0; deg<90; deg+=0.5){
+      const c=Math.cos(deg*Math.PI/180), sn=Math.sin(deg*Math.PI/180);
+      let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+      cloud.forEach(([x,y])=>{ const u=c*x+sn*y, v=-sn*x+c*y; if(u<x0)x0=u; if(u>x1)x1=u; if(v<y0)y0=v; if(v>y1)y1=v; });
+      const area=(x1-x0)*(y1-y0);
+      if(area < bestArea-1e-6){ bestArea=area; bestA=deg; }
+    }
+    const c=Math.cos(bestA*Math.PI/180), sn=Math.sin(bestA*Math.PI/180);
+    const ex2 = v3.add(v3.mul(ex,c), v3.mul(ey,sn)), ey2 = v3.add(v3.mul(ex,-sn), v3.mul(ey,c));
+    ex = ex2; ey = ey2;
+  }
   const to2 = (fi,p)=>{ const q = m3.apply(maps[fi],p); const w = v3.sub(q,o0); return { x:v3.dot(w,ex), y:v3.dot(w,ey) }; };
 
   const entities = [], polys = [], strips = [];
@@ -2520,6 +2561,8 @@ function stepSheetUnfold(M, K){
     areaNet += b.BA*b.width;
   });
   const bbox = { minX,minY,maxX,maxY };
+  // Nombre réel de contours fermés du développé (extérieur + trous, y compris ceux coupés par des plis)
+  try{ const chained = laserNetArea(entities); if(chained && chained.loops>=1) pierces = chained.loops; }catch(err){ /* on garde le décompte par faces */ }
   return {
     totalLength, pierces, entities, bbox,
     netArea: { net: areaNet, bb: bbox, faces: polys, strips, outerPts:null, holePts:[] },
