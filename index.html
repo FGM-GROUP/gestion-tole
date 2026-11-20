@@ -408,11 +408,12 @@ let currentTab = 'inventaire';
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
    v4.9 (13/11) Devis laser : surface réelle du contour, emprise des arcs corrigée, détail de la ligne matière, taux laser 150 €/h ; Imbrication : retrait de pièces, plusieurs fichiers, tôles supplémentaires automatiques
+   v5.3 (20/11) Cintrage : lecture des tubes modélisés en surfaces B-spline (assemblages CATIA, tuyaux de frein), ligne moyenne reconstituée, points et LRA
    v5.2 (19/11) STEP : nombre de plis calculé (plis distincts, pièces cumulées) et affiché dans les résultats
    v5.1 (19/11) STEP à plusieurs pièces (sélection ou somme), épaisseur lue sur la face opposée, K par défaut 0,35 validé sur un plan CATIA
    v5.0 (19/11) Nouvel onglet Cintrage « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) */
-const APP_VERSION = '5.2';
-const APP_VERSION_DATE = '19/11/2026';
+const APP_VERSION = '5.3';
+const APP_VERSION_DATE = '20/11/2026';
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -1934,6 +1935,272 @@ function parseStepTube(text){
   return { points, radii, OD: 2*rOut, ID: rIn!=null ? 2*rIn : null };
 }
 
+/* ---- CINTRAGE : tube modélisé en surfaces B-spline (ex. tuyaux CATIA / assemblages) ----
+   Pas de cylindres ni de tores : on échantillonne les surfaces du solide « tube », puis on reconstruit la ligne
+   moyenne par coupes successives (cercle ajusté dans chaque section), on détecte les cintres par la courbure,
+   on ajuste une droite sur chaque tronçon et les points d'intersection sont les intersections des droites. */
+function stepStatements(text){
+  const body = text.replace(/\/\*[\s\S]*?\*\//g,'');
+  const S = new Map();
+  const re = /#(\d+)\s*=\s*([\s\S]*?);\s*(?=#\d+\s*=|ENDSEC)/g;
+  let m;
+  while((m = re.exec(body))) S.set(m[1], m[2]);
+  return S;
+}
+function stBalanced(s, start){
+  let d = 0;
+  for(let i=start;i<s.length;i++){
+    const c = s[i];
+    if(c==='(') d++;
+    else if(c===')'){ d--; if(d===0) return i; }
+  }
+  return s.length-1;
+}
+function stNums(s){ return (s.match(/[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g)||[]).map(parseFloat); }
+function stRefs(s){ return (s.replace(/'[^']*'/g,'').match(/#\d+/g)||[]).map(x=>x.slice(1)); }
+function stCleanName(s){ return (s||'').replace(/\\X2\\([0-9A-F]+)\\X0\\/g,(m,h)=>{ let o=''; for(let i=0;i<h.length;i+=4) o+=String.fromCharCode(parseInt(h.substr(i,4),16)); return o; }); }
+
+function stSplineSurface(S, id){
+  const raw = S.get(id); if(!raw) return null;
+  const pt = pid => { const r = S.get(pid); if(!r) return null; const k = r.lastIndexOf('('); const n = stNums(r.slice(k)); return n.length>=3 ? n.slice(0,3) : null; };
+  let p,q,grid,um,vm,uk,vk,W=null;
+  const isComplex = raw.trim().startsWith('(');
+  if(isComplex){
+    if(raw.indexOf('B_SPLINE_SURFACE_WITH_KNOTS')<0) return null;
+    const a = raw.indexOf('B_SPLINE_SURFACE(');
+    const head = raw.slice(a+17).match(/^\s*(\d+)\s*,\s*(\d+)\s*,/); if(!head) return null;
+    p = +head[1]; q = +head[2];
+    const g0 = raw.indexOf('((', a+17); grid = raw.slice(g0, stBalanced(raw,g0)+1);
+    const kk = raw.indexOf('B_SPLINE_SURFACE_WITH_KNOTS(');
+    const k0 = raw.indexOf('(', kk); const kb = raw.slice(k0, stBalanced(raw,k0)+1);
+    const gr = kb.slice(1,-1).match(/\(([^()]*)\)/g)||[]; if(gr.length<4) return null;
+    [um,vm,uk,vk] = gr.slice(0,4).map(stNums);
+    const wi = raw.indexOf('RATIONAL_B_SPLINE_SURFACE(');
+    if(wi>=0){ const w0 = raw.indexOf('((', wi); const wg = raw.slice(w0, stBalanced(raw,w0)+1); W = (wg.match(/\(([^()]*)\)/g)||[]).map(stNums); }
+  }else{
+    if(!/^B_SPLINE_SURFACE_WITH_KNOTS/.test(raw.trim())) return null;
+    const a = raw.indexOf('(');
+    const head = raw.slice(a+1).match(/^\s*'[^']*'\s*,\s*(\d+)\s*,\s*(\d+)\s*,/); if(!head) return null;
+    p = +head[1]; q = +head[2];
+    const g0 = raw.indexOf('((', a); const g1 = stBalanced(raw,g0); grid = raw.slice(g0,g1+1);
+    const rest = raw.slice(g1+1); const gr = rest.match(/\(([^()]*)\)/g)||[]; if(gr.length<4) return null;
+    [um,vm,uk,vk] = gr.slice(0,4).map(stNums);
+  }
+  const rows = (grid.slice(1,-1).match(/\(([^()]*)\)/g)||[]).map(r=>stRefs(r).map(pt));
+  if(!rows.length || rows.some(r=>r.some(x=>!x))) return null;
+  const expand = (mm,kk)=>{ const o=[]; mm.forEach((m,i)=>{ for(let j=0;j<m;j++) o.push(kk[i]); }); return o; };
+  return { p, q, cp: rows, W, U: expand(um,uk), V: expand(vm,vk) };
+}
+function stBasis(K, p, u){
+  const n = K.length-p-2; // dernier indice de fonction
+  let s;
+  if(u>=K[n+1]) s = n; else if(u<=K[p]) s = p; else { let lo=p, hi=n+1; while(hi-lo>1){ const mid=(lo+hi)>>1; if(u>=K[mid]) lo=mid; else hi=mid; } s = lo; }
+  const N = new Array(p+1).fill(0); N[0]=1; const L=[], R=[];
+  for(let j=1;j<=p;j++){
+    L[j] = u-K[s+1-j]; R[j] = K[s+j]-u; let saved = 0;
+    for(let r=0;r<j;r++){ const den = R[r+1]+L[j-r]; const t = den ? N[r]/den : 0; N[r] = saved + R[r+1]*t; saved = L[j-r]*t; }
+    N[j] = saved;
+  }
+  return { s, N };
+}
+function stSampleSurface(sf, step, out){
+  const { p,q,cp,W,U,V } = sf;
+  const nu = cp.length, nv = cp[0].length;
+  // taille approximative du patch
+  let lu=0, lv=0;
+  for(let j=0;j<nv;j+=Math.max(1,nv-1)) for(let i=0;i<nu-1;i++) lu = Math.max(lu, Math.hypot(cp[i+1][j][0]-cp[i][j][0], cp[i+1][j][1]-cp[i][j][1], cp[i+1][j][2]-cp[i][j][2]));
+  let totU=0, totV=0;
+  for(let i=0;i<nu-1;i++) totU += Math.hypot(cp[i+1][0][0]-cp[i][0][0], cp[i+1][0][1]-cp[i][0][1], cp[i+1][0][2]-cp[i][0][2]);
+  for(let j=0;j<nv-1;j++) totV += Math.hypot(cp[0][j+1][0]-cp[0][j][0], cp[0][j+1][1]-cp[0][j][1], cp[0][j+1][2]-cp[0][j][2]);
+  const nU = Math.max(6, Math.min(120, Math.ceil(totU/step))), nV = Math.max(6, Math.min(120, Math.ceil(totV/step)));
+  const u0=U[p], u1=U[U.length-p-1], v0=V[q], v1=V[V.length-q-1];
+  const Bv = []; for(let b=0;b<=nV;b++) Bv.push(stBasis(V,q,v0+(v1-v0)*b/nV));
+  for(let a=0;a<=nU;a++){
+    const bu = stBasis(U,p,u0+(u1-u0)*a/nU);
+    for(let b=0;b<=nV;b++){
+      const bv = Bv[b]; let x=0,y=0,z=0,w=0;
+      for(let i=0;i<=p;i++){ const ii = bu.s-p+i; if(ii<0||ii>=nu) continue;
+        for(let j=0;j<=q;j++){ const jj = bv.s-q+j; if(jj<0||jj>=nv) continue;
+          const wt = (W ? W[ii][jj] : 1) * bu.N[i]*bv.N[j]; const c = cp[ii][jj];
+          x += wt*c[0]; y += wt*c[1]; z += wt*c[2]; w += wt; } }
+      if(w) out.push(x/w, y/w, z/w);
+    }
+  }
+}
+function stFindTubeSolids(S){
+  // solides dont toutes les faces sont des surfaces B-spline ; le tube porte en général « tube » / « tuyau » dans son nom
+  const prodNames = {};
+  S.forEach((raw,id)=>{ if(/^PRODUCT\(/.test(raw)){ const m = raw.match(/^PRODUCT\('([^']*)'/); if(m) prodNames[id] = stCleanName(m[1]); } });
+  const solids = [];
+  S.forEach((raw,id)=>{
+    if(!/^MANIFOLD_SOLID_BREP/.test(raw)) return;
+    const nm = (raw.match(/^MANIFOLD_SOLID_BREP\('([^']*)'/)||[])[1] || '';
+    const shell = S.get(stRefs(raw)[0]); if(!shell) return;
+    const faces = stRefs(shell);
+    let nb=0, nOther=0;
+    faces.forEach(f=>{
+      const fr = S.get(f); if(!fr) return;
+      const sr = stRefs(fr); const surf = S.get(sr[sr.length-1]) || '';
+      if(/B_SPLINE_SURFACE/.test(surf)) nb++; else nOther++;
+    });
+    solids.push({ id, name: stCleanName(nm), faces, nb, nOther });
+  });
+  // associe le nom du produit si le solide n'est pas nommé : l'ordre des PRODUCT suit celui des solides dans ces exports
+  const pn = Object.keys(prodNames).map(k=>prodNames[k]);
+  return { solids, pn };
+}
+
+function parseStepTubeSpline(text){
+  const S = stepStatements(text);
+  const { solids, pn } = stFindTubeSolids(S);
+  const cand = solids.filter(s=>s.nb>0 && s.nOther===0);
+  if(!cand.length) throw new Error('Aucun solide en surfaces B-spline trouvé.');
+  // noms : MANIFOLD_SOLID_BREP porte souvent le même nom que le PRODUCT correspondant
+  const named = cand.filter(s=>/tube|tuyau|pipe/i.test(s.name));
+  let pick = named.length ? named : cand;
+  let best = null, lastErr = null;
+  for(const sol of pick){
+    try{ const r = splineTubeFromSolid(S, sol); if(!best || r.length>best.length) best = r; }catch(e){ lastErr = e; }
+  }
+  if(!best) throw lastErr || new Error('Tube non reconnu.');
+  return best;
+}
+
+function splineTubeFromSolid(S, sol){
+  // 1) nuage de points sur les surfaces
+  const raw = [];
+  sol.faces.forEach(f=>{
+    const fr = S.get(f); if(!fr) return; const sr = stRefs(fr);
+    const sf = stSplineSurface(S, sr[sr.length-1]); if(sf) stSampleSurface(sf, 0.6, raw);
+  });
+  const N = raw.length/3; if(N<200) throw new Error('Surface du tube trop pauvre pour être analysée.');
+  const P = new Float64Array(raw);
+  const CELL = 4, grid = new Map();
+  const key = (i,j,k)=> (i+512)*1048576 + (j+512)*1024 + (k+512);
+  for(let n=0;n<N;n++){ const k = key(Math.floor(P[3*n]/CELL), Math.floor(P[3*n+1]/CELL), Math.floor(P[3*n+2]/CELL)); let a = grid.get(k); if(!a){ a=[]; grid.set(k,a); } a.push(n); }
+  const ball = (c,R)=>{
+    const out=[]; const i0=Math.floor((c[0]-R)/CELL), i1=Math.floor((c[0]+R)/CELL), j0=Math.floor((c[1]-R)/CELL), j1=Math.floor((c[1]+R)/CELL), k0=Math.floor((c[2]-R)/CELL), k1=Math.floor((c[2]+R)/CELL);
+    const R2=R*R;
+    for(let i=i0;i<=i1;i++) for(let j=j0;j<=j1;j++) for(let k=k0;k<=k1;k++){ const a=grid.get(key(i,j,k)); if(!a) continue;
+      for(const n of a){ const dx=P[3*n]-c[0], dy=P[3*n+1]-c[1], dz=P[3*n+2]-c[2]; if(dx*dx+dy*dy+dz*dz<=R2) out.push(n); } }
+    return out;
+  };
+  const basis = d=>{ const a = Math.abs(d[0])<0.9 ? [1,0,0] : [0,1,0]; let u = v3.cross(d,a); u = v3.unit(u); return [u, v3.cross(d,u)]; };
+  // cercle ajusté dans la tranche perpendiculaire à d (moindres carrés algébriques)
+  const circfit = (c,d,h,R)=>{
+    const idx = ball(c,R); const [u,v] = basis(d); const xs=[], ys=[];
+    for(const n of idx){ const w=[P[3*n]-c[0],P[3*n+1]-c[1],P[3*n+2]-c[2]]; if(Math.abs(v3.dot(w,d))<h){ xs.push(v3.dot(w,u)); ys.push(v3.dot(w,v)); } }
+    if(xs.length<12) return null;
+    // normales : [Σ4x², Σ4xy, Σ2x; ...] résolues par Cramer
+    let sxx=0,sxy=0,syy=0,sx=0,sy=0,sb=0,sxb=0,syb=0; const n=xs.length;
+    for(let i=0;i<n;i++){ const x=xs[i], y=ys[i], b=x*x+y*y; sxx+=x*x; sxy+=x*y; syy+=y*y; sx+=x; sy+=y; sb+=b; sxb+=x*b; syb+=y*b; }
+    const A=[[4*sxx,4*sxy,2*sx],[4*sxy,4*syy,2*sy],[2*sx,2*sy,n]], B=[2*sxb,2*syb,sb];
+    const det3=M=>M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1])-M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0])+M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]);
+    const D=det3(A); if(Math.abs(D)<1e-9) return null;
+    const col=(k)=>A.map((r,i)=>r.map((x,j)=>j===k?B[i]:x));
+    const a=det3(col(0))/D, b=det3(col(1))/D, cc=det3(col(2))/D;
+    const r2 = cc + a*a + b*b; if(r2<=0) return null;
+    return { c: v3.add(c, v3.add(v3.mul(u,a), v3.mul(v,b))), r: Math.sqrt(r2), n };
+  };
+  // 2) point de départ : un point du nuage, axe local par ACP
+  const mid = Math.floor(N/2); const p0 = [P[3*mid],P[3*mid+1],P[3*mid+2]];
+  const idx0 = ball(p0,7); const m0=[0,0,0]; idx0.forEach(n=>{ m0[0]+=P[3*n]; m0[1]+=P[3*n+1]; m0[2]+=P[3*n+2]; }); m0[0]/=idx0.length; m0[1]/=idx0.length; m0[2]/=idx0.length;
+  const pcaDir = (idx,m)=>{ const C=[[0,0,0],[0,0,0],[0,0,0]]; idx.forEach(n=>{ const w=[P[3*n]-m[0],P[3*n+1]-m[1],P[3*n+2]-m[2]]; for(let i=0;i<3;i++) for(let j=0;j<3;j++) C[i][j]+=w[i]*w[j]; });
+    let d=[1,0.3,0.2]; for(let it=0;it<60;it++){ const nd=[0,0,0]; for(let i=0;i<3;i++) nd[i]=C[i][0]*d[0]+C[i][1]*d[1]+C[i][2]*d[2]; d=v3.unit(nd); } return d; };
+  let d0 = pcaDir(idx0,m0), c0 = m0, r0 = null;
+  for(let it=0;it<4;it++){ const f = circfit(c0,d0,0.8,9); if(!f) break; c0 = f.c; r0 = f.r; const id2 = ball(c0,8); d0 = pcaDir(id2,c0); }
+  if(!r0) throw new Error('Section du tube introuvable.');
+  // le tube peut contenir une paroi intérieure : on retient le rayon extérieur le plus fréquent (la plupart des fichiers n'ont que l'extérieur)
+  const rTube = r0;
+  const march = (c,d)=>{
+    const pts=[c]; let miss=0; pts.rs=[];
+    for(let k=0;k<6000;k++){
+      let cn = v3.add(c, d); let f=null;
+      for(let it=0;it<3;it++){ f = circfit(cn,d,0.8,9); if(!f) break; cn = f.c; }
+      if(!f || Math.abs(f.r-rTube)>0.2*rTube){ miss++; if(miss>25) break; c = v3.add(c,d); continue; }
+      miss=0;
+      let dn = v3.sub(cn, pts[pts.length-1]); dn = v3.unit(dn);
+      d = v3.unit(v3.add(v3.mul(d,0.6), v3.mul(dn,0.4)));
+      c = cn; pts.push(c); pts.rs.push(f.r);
+    }
+    return pts;
+  };
+  const fw = march(c0,d0), bw = march(c0,v3.mul(d0,-1));
+  const rsAll = fw.rs.concat(bw.rs).sort((a,b)=>a-b); const rMed = rsAll.length ? rsAll[Math.floor(rsAll.length/2)] : rTube;
+  const path = bw.slice(1).reverse().concat(fw);
+  if(path.length<10) throw new Error('Ligne moyenne du tube non reconstituée.');
+  // 3) rééchantillonnage régulier 0,5 mm + lissage gaussien
+  const h = 0.5; const cum=[0]; for(let i=1;i<path.length;i++) cum.push(cum[i-1]+v3.len(v3.sub(path[i],path[i-1])));
+  const total = cum[cum.length-1]; const M = Math.floor(total/h)+1; const q=[]; let seg=0;
+  for(let i=0;i<M;i++){ const s=i*h; while(seg<cum.length-2 && cum[seg+1]<s) seg++; const t=(s-cum[seg])/((cum[seg+1]-cum[seg])||1); q.push(v3.add(path[seg], v3.mul(v3.sub(path[seg+1],path[seg]), t))); }
+  const gauss = (arr,sig)=>{ const rad = Math.ceil(3*sig); const w=[]; let sw=0; for(let k=-rad;k<=rad;k++){ const x=Math.exp(-k*k/(2*sig*sig)); w.push(x); sw+=x; }
+    return arr.map((_,i)=>{ let a=0,b=0,c=0; for(let k=-rad;k<=rad;k++){ const j=Math.min(arr.length-1,Math.max(0,i+k)); const x=w[k+rad]; a+=x*arr[j][0]; b+=x*arr[j][1]; c+=x*arr[j][2]; } return [a/sw,b/sw,c/sw]; }); };
+  const gauss1 = (arr,sig)=>{ const rad = Math.ceil(3*sig); const w=[]; let sw=0; for(let k=-rad;k<=rad;k++){ const x=Math.exp(-k*k/(2*sig*sig)); w.push(x); sw+=x; }
+    return arr.map((_,i)=>{ let a=0; for(let k=-rad;k<=rad;k++){ const j=Math.min(arr.length-1,Math.max(0,i+k)); a+=w[k+rad]*arr[j]; } return a/sw; }); };
+  const sigma = Math.max(2, 0.9*rTube)/h;
+  const qs = gauss(q, sigma);
+  const grad = arr=>arr.map((_,i)=>{ const a=arr[Math.max(0,i-1)], b=arr[Math.min(arr.length-1,i+1)]; const dd=(Math.min(arr.length-1,i+1)-Math.max(0,i-1))||1; return [(b[0]-a[0])/dd,(b[1]-a[1])/dd,(b[2]-a[2])/dd]; });
+  const T = grad(qs).map(v3.unit); const dT = grad(T);
+  const kap = gauss1(dT.map(v=>v3.len(v)/h), 3);
+  const sorted = kap.slice().sort((a,b)=>a-b); const kmax = sorted[Math.floor(0.95*(sorted.length-1))];
+  const thr = Math.max(0.2*kmax, 1e-4);
+  // 4) cintres = zones de forte courbure
+  let runs=[]; for(let i=0;i<kap.length;){ if(kap[i]>thr){ let j=i; while(j<kap.length&&kap[j]>thr) j++; runs.push([i,j]); i=j; } else i++; }
+  const merged=[]; runs.forEach(r=>{ if(merged.length && (r[0]-merged[merged.length-1][1])*h < 1.5*rTube) merged[merged.length-1][1]=r[1]; else merged.push(r.slice()); });
+  runs = merged.filter(r=>{ let a=0; for(let i=r[0];i<r[1];i++) a+=kap[i]*h; return a>=0.07; }); // au moins 4° de pliage
+  if(!runs.length){ // tube droit
+    const lf = lineFitPts(q); const ts=q.map(p=>v3.dot(v3.sub(p,lf.c),lf.d));
+    return { points:[v3.add(lf.c,v3.mul(lf.d,Math.min(...ts))), v3.add(lf.c,v3.mul(lf.d,Math.max(...ts)))], radii:[], OD:2*rMed, ID:null, length:total, estimated:true, name:sol.name };
+  }
+  // 5) droites des tronçons (marge 2,5 mm autour des cintres) puis intersections
+  const bounds=[0]; runs.forEach(r=>{ bounds.push(r[0], r[1]); }); bounds.push(q.length-1);
+  const lines=[]; const trim = Math.round(2.5/h);
+  for(let k=0;k<=runs.length;k++){
+    let a=bounds[2*k], b=bounds[2*k+1]; if(k>0) a+=trim; if(k<runs.length) b-=trim;
+    if(b-a<6) throw new Error('Tronçon droit trop court entre deux cintres (' + ((bounds[2*k+1]-bounds[2*k])*h).toFixed(1) + ' mm) : analyse automatique impossible.');
+    const lf = lineFitPts(q.slice(a,b+1)); let d = lf.d; if(v3.dot(d, v3.sub(q[b],q[a]))<0) d = v3.mul(d,-1);
+    lines.push({ c:lf.c, d });
+  }
+  const inter = (A,B)=>{ const b=v3.dot(A.d,B.d), w=v3.sub(A.c,B.c), dd=v3.dot(A.d,w), e=v3.dot(B.d,w), den=1-b*b;
+    if(Math.abs(den)<1e-9) throw new Error('Deux tronçons consécutifs parallèles : point d\'intersection non défini.');
+    const t=(b*e-dd)/den, s=(e-b*dd)/den; return v3.mul(v3.add(v3.add(A.c,v3.mul(A.d,t)), v3.add(B.c,v3.mul(B.d,s))),0.5); };
+  const V=[]; for(let i=0;i<lines.length-1;i++) V.push(inter(lines[i],lines[i+1]));
+  // 6) extrémités : point du nuage le plus loin le long de l'axe, dans le prolongement du premier / dernier tronçon
+  const endPt = (L,Vn,sign)=>{ const d = v3.mul(L.d,sign); let tmax=-1e9;
+    const idx = ball(v3.add(Vn, v3.mul(d, 0)), 1e9>0?1:1); // placeholder (non utilisé)
+    for(let n=0;n<N;n++){ const w=[P[3*n]-L.c[0],P[3*n+1]-L.c[1],P[3*n+2]-L.c[2]]; const t=v3.dot(w,d); const rad=v3.len(v3.sub(w,v3.mul(d,t))); if(rad<1.6*rTube && t>tmax) tmax=t; }
+    return v3.add(L.c, v3.mul(d,tmax)); };
+  const s0 = Math.sign(v3.dot(lines[0].d, v3.sub(V[0],lines[0].c)))||1; const S0 = endPt(lines[0], V[0], -s0);
+  const sl = lines[lines.length-1], s1 = Math.sign(v3.dot(sl.d, v3.sub(V[V.length-1],sl.c)))||1; const S1 = endPt(sl, V[V.length-1], -s1);
+  const pts = [S0, ...V, S1];
+  // diamètres mesurés sur le plus long tronçon droit (le nuage contient la peau extérieure et, souvent, la peau intérieure)
+  let ODm = 2*rMed, IDm = null;
+  { let bi=0, bl=-1; for(let i=0;i<pts.length-1;i++){ const l=v3.len(v3.sub(pts[i+1],pts[i])); if(l>bl){ bl=l; bi=i; } }
+    const A=pts[bi], B=pts[bi+1], dd=v3.unit(v3.sub(B,A)), Lb=bl, rr=[];
+    for(let n=0;n<N;n++){ const w=[P[3*n]-A[0],P[3*n+1]-A[1],P[3*n+2]-A[2]]; const t=v3.dot(w,dd); if(t<0.35*Lb||t>0.65*Lb) continue; const rad=v3.len(v3.sub(w,v3.mul(dd,t))); if(rad<1.3*rMed) rr.push(rad); }
+    if(rr.length>50){ const bw=0.05, nb=Math.ceil(1.3*rMed/bw)+1, H=new Array(nb).fill(0); rr.forEach(r=>{ H[Math.min(nb-1,Math.floor(r/bw))]++; });
+      const hm=Math.max(...H); let io=-1, ii=-1; for(let i=0;i<nb;i++) if(H[i]>=0.2*hm){ if(ii<0) ii=i; io=i; }
+      const meanAround=(i)=>{ let a=0,n=0; rr.forEach(r=>{ if(Math.abs(r-(i+0.5)*bw)<0.2){ a+=r; n++; } }); return n? a/n : (i+0.5)*bw; };
+      const ro=meanAround(io), ri=meanAround(ii); ODm = 2*ro; if(ri<0.8*ro && ro-ri>0.3) IDm = 2*ri; } }
+  // 7) rayon de cintrage : écart entre le sommet théorique et la ligne moyenne, médiane des cintres > 30°
+  const dirs=[]; for(let i=0;i<pts.length-1;i++) dirs.push(v3.unit(v3.sub(pts[i+1],pts[i])));
+  const Rs=[];
+  for(let i=0;i<V.length;i++){
+    const th = Math.acos(Math.max(-1,Math.min(1,v3.dot(dirs[i],dirs[i+1])))); if(th<0.5) continue;
+    let dmin=1e9; q.forEach(p=>{ const dd=v3.len(v3.sub(p,V[i])); if(dd<dmin) dmin=dd; });
+    Rs.push(dmin/(1/Math.cos(th/2)-1));
+  }
+  Rs.sort((a,b)=>a-b); const Rm = Rs.length ? Rs[Math.floor(Rs.length/2)] : 0;
+  const R = Math.round(Rm*10)/10;
+  return { points: pts, radii: V.map(()=>R), OD: ODm, ID: IDm, length: total, estimated: true, name: sol.name };
+}
+function lineFitPts(Q){
+  const c=[0,0,0]; Q.forEach(p=>{ c[0]+=p[0]; c[1]+=p[1]; c[2]+=p[2]; }); c[0]/=Q.length; c[1]/=Q.length; c[2]/=Q.length;
+  const C=[[0,0,0],[0,0,0],[0,0,0]]; Q.forEach(p=>{ const w=[p[0]-c[0],p[1]-c[1],p[2]-c[2]]; for(let i=0;i<3;i++) for(let j=0;j<3;j++) C[i][j]+=w[i]*w[j]; });
+  let d=[1,0.37,0.21]; for(let it=0;it<80;it++){ const nd=[0,0,0]; for(let i=0;i<3;i++) nd[i]=C[i][0]*d[0]+C[i][1]*d[1]+C[i][2]*d[2]; d=v3.unit(nd); }
+  return { c, d };
+}
+
 function cintrageMetrics(raw, rImpose){
   const P = raw.points, n = P.length-2;
   const dirs = []; for(let i=0;i<P.length-1;i++) dirs.push(v3.unit(v3.sub(P[i+1],P[i])));
@@ -2077,7 +2344,7 @@ function cintrageExport(m){
     ['Diamètre extérieur (mm)', round(raw.OD,2)],
     ['Épaisseur de paroi (mm)', raw.ID!=null ? round((raw.OD-raw.ID)/2,2) : 'non détectée (tube plein ou non lisible)'],
     ['Nombre de cintrages', m.bends.length],
-    ['Rayon de cintrage', cintrage.rayonImpose>0 ? cintrage.rayonImpose+' (imposé)' : 'lu dans le fichier (par cintre)'],
+    ['Rayon de cintrage', cintrage.rayonImpose>0 ? cintrage.rayonImpose+' (imposé)' : (cintrage.raw && cintrage.raw.estimated ? 'estimé sur le modèle (à confirmer)' : 'lu dans le fichier (par cintre)')],
     ['LRA — longueur rectiligne développée (mm)', round(m.LRA,2)],
     ['dont longueurs droites (mm)', round(m.sumStraight,2)],
     ['dont arcs développés (mm)', round(m.sumArc,2)],
@@ -2115,6 +2382,7 @@ function renderCintrage(){
         <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Le tube doit être un solide ou une surface avec ses tronçons droits (cylindres) et ses cintres (tores).</span>
       </div>
       ${cintrage.error ? `<div style="color:var(--danger);font-size:13px;margin-top:10px;">${escapeHtml(cintrage.error)}</div>` : ''}
+      ${raw && raw.estimated ? `<div style="font-size:12px;color:var(--ink-dim);margin-top:10px;line-height:1.6;background:var(--panel-2,#f4f4f2);border-radius:8px;padding:10px 12px;">Tube modélisé en surfaces B-spline (sans cylindres ni tores) : la ligne moyenne a été reconstituée à partir des surfaces${raw.name ? ' du solide « ' + escapeHtml(String(raw.name).split('|').slice(-2,-1)[0] || raw.name) + ' »' : ''}. Précision attendue : environ ±0,3 mm sur les points et ±0,5° sur les angles. <b>Rayon de cintrage estimé : ${raw.radii.length ? cintrageFmt(raw.radii[0],1) : '—'} mm</b> — saisis le rayon réel de ton outil dans le champ « Rayon de cintrage imposé » pour obtenir une LRA exacte.</div>` : ''}
 
       ${m ? `
       <div class="grid3" style="margin:16px 0;">
@@ -2166,7 +2434,9 @@ function renderCintrage(){
     try{
       const text = await file.text();
       try{ cintrage.wire = parseStepWireframe(text); }catch(err){ console.warn('Fil de fer STEP indisponible', err); }
-      cintrage.raw = parseStepTube(text);
+      let splineErr = null;
+      if(/B_SPLINE_SURFACE/.test(text)){ try{ cintrage.raw = parseStepTubeSpline(text); }catch(err){ splineErr = err; console.warn('Lecture B-spline impossible', err); } }
+      if(!cintrage.raw){ try{ cintrage.raw = parseStepTube(text); }catch(err){ if(splineErr) throw splineErr; throw err; } }
       toast('Tube analysé');
     }catch(err){
       console.error(err);
