@@ -408,12 +408,15 @@ let currentTab = 'inventaire';
    v4.7 Découpe laser : devis (programme, prise en charge, matière, découpe, marge) + export CSV
    v4.8 Prix au kilo et densité des matières centralisés dans Paramètres (Pièce, Outillage, devis laser)
    v4.9 (13/11) Devis laser : surface réelle du contour, emprise des arcs corrigée, détail de la ligne matière, taux laser 150 €/h ; Imbrication : retrait de pièces, plusieurs fichiers, tôles supplémentaires automatiques
+   v5.6 (25/11) Découpe laser STEP : plan PDF optionnel, contrôle automatique de l'encombrement du développé (vue dépliée 1:1)
+   v5.5 (25/11) Développé STEP : découpes à contour courbe (fentes, lumières en B-spline / extrusion) acceptées
+   v5.4 (20/11) Cintrage : tuyaux en plusieurs solides recollés, choix du tube, inversion du sens, prolongation/raccourcissement des extrémités
    v5.3 (20/11) Cintrage : lecture des tubes modélisés en surfaces B-spline (assemblages CATIA, tuyaux de frein), ligne moyenne reconstituée, points et LRA
    v5.2 (19/11) STEP : nombre de plis calculé (plis distincts, pièces cumulées) et affiché dans les résultats
    v5.1 (19/11) STEP à plusieurs pièces (sélection ou somme), épaisseur lue sur la face opposée, K par défaut 0,35 validé sur un plan CATIA
    v5.0 (19/11) Nouvel onglet Cintrage « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) */
-const APP_VERSION = '5.3';
-const APP_VERSION_DATE = '20/11/2026';
+const APP_VERSION = '5.6';
+const APP_VERSION_DATE = '25/11/2026';
 
 /* ---------------------------------------------------------
    🔧 CONFIGURATION — collez ici les valeurs de votre projet Firebase
@@ -1802,7 +1805,7 @@ function renderNestResult(result){
    les sommets (et les deux extrémités) de la ligne brisée théorique, puis on calcule la LRA
    (longueur rectiligne développée = droites + arcs).
 --------------------------------------------------------- */
-let cintrage = { fileName:'', raw:null, error:'', wire:null, rayonImpose:null, view:{ yaw:-0.7, pitch:0.45, zoom:1 } };
+let cintrage = { fileName:'', raw:null, base:null, sel:0, inverse:false, adjStart:0, adjEnd:0, error:'', wire:null, rayonImpose:null, view:{ yaw:-0.7, pitch:0.45, zoom:1 } };
 
 const v3 = {
   sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
@@ -2050,20 +2053,59 @@ function stFindTubeSolids(S){
   return { solids, pn };
 }
 
-function parseStepTubeSpline(text){
+function parseStepTubeSplineAll(text){
   const S = stepStatements(text);
-  const { solids, pn } = stFindTubeSolids(S);
-  const cand = solids.filter(s=>s.nb>0 && s.nOther===0);
+  const { solids } = stFindTubeSolids(S);
+  const cand = solids.filter(s=>s.nb>=4);
   if(!cand.length) throw new Error('Aucun solide en surfaces B-spline trouvé.');
-  // noms : MANIFOLD_SOLID_BREP porte souvent le même nom que le PRODUCT correspondant
   const named = cand.filter(s=>/tube|tuyau|pipe/i.test(s.name));
-  let pick = named.length ? named : cand;
-  let best = null, lastErr = null;
-  for(const sol of pick){
-    try{ const r = splineTubeFromSolid(S, sol); if(!best || r.length>best.length) best = r; }catch(e){ lastErr = e; }
+  const use = named.length ? named : cand;
+  const res = []; let lastErr = null;
+  use.forEach(sol=>{ try{ const r = splineTubeFromSolid(S, sol); if(r.length>15) res.push(r); }catch(e){ lastErr = e; } });
+  if(!res.length) throw lastErr || new Error('Tube non reconnu.');
+  return chainSplineTubes(res);
+}
+function parseStepTubeSpline(text){ return parseStepTubeSplineAll(text)[0]; }
+
+/* Un même tuyau est souvent coupé en plusieurs solides (raccords, manchons au milieu) : on recolle les morceaux dont
+   les droites d'extrémité se rejoignent (le sommet caché sous le manchon est l'intersection des deux droites). */
+function chainSplineTubes(list){
+  list = list.map(r=>({ ...r, points:r.points.slice(), radii:r.radii.slice() }));
+  const rev = r=>({ ...r, points:r.points.slice().reverse(), radii:r.radii.slice().reverse() });
+  let again = true;
+  while(again){
+    again = false;
+    for(let i=0;i<list.length && !again;i++) for(let j=i+1;j<list.length && !again;j++){
+      for(const ea of [0,1]) for(const eb of [0,1]){
+        if(again) break;
+        const A = ea===0 ? rev(list[i]) : list[i];   // extrémité de jonction = dernier point
+        const B = eb===1 ? rev(list[j]) : list[j];   // extrémité de jonction = premier point
+        const nA = A.points.length, a1 = A.points[nA-1], a0 = A.points[nA-2], b0 = B.points[0], b1 = B.points[1];
+        const dA = v3.unit(v3.sub(a1,a0)), dB = v3.unit(v3.sub(b0,b1)); // directions sortantes
+        const cosA = v3.dot(dA, dB);
+        const w = v3.sub(a1,b0);
+        let V = null, collinear = false;
+        if(Math.abs(cosA)>0.9995){ // même droite ?
+          const off = v3.len(v3.sub(w, v3.mul(dA, v3.dot(w,dA))));
+          if(off<1.5 && v3.dot(v3.sub(b0,a1),dA)>0 && v3.len(v3.sub(b0,a1))<150 && cosA<0){ collinear = true; }
+          else if(off<1.5 && cosA>0) continue;
+          else continue;
+        }else{
+          const b = v3.dot(dA,dB), d = v3.dot(dA,w), e = v3.dot(dB,w), den = 1-b*b;
+          const t = (b*e-d)/den, sB = (e-b*d)/den; // a1 + dA*t  et  b0 + dB*sB
+          const pA = v3.add(a1, v3.mul(dA,t)), pB = v3.add(b0, v3.mul(dB,sB));
+          if(v3.len(v3.sub(pA,pB))>2 || t<0 || sB<0 || t>150 || sB>150) continue;
+          V = v3.mul(v3.add(pA,pB),0.5);
+        }
+        const Rm = (A.radii.concat(B.radii).sort((x,y)=>x-y)[Math.floor((A.radii.length+B.radii.length)/2)]) || 0;
+        const pts = collinear ? A.points.slice(0,-1).concat(B.points.slice(1)) : A.points.slice(0,-1).concat([V], B.points.slice(1));
+        const radii = collinear ? A.radii.concat(B.radii) : A.radii.concat([Rm], B.radii);
+        const merged = { ...A, points:pts, radii, length:(A.length||0)+(B.length||0), name:(A.name||'').split('|').pop()+' + '+(B.name||'').split('|').pop() };
+        list.splice(j,1); list.splice(i,1,merged); again = true;
+      }
+    }
   }
-  if(!best) throw lastErr || new Error('Tube non reconnu.');
-  return best;
+  return list;
 }
 
 function splineTubeFromSolid(S, sol){
@@ -2199,6 +2241,16 @@ function lineFitPts(Q){
   const C=[[0,0,0],[0,0,0],[0,0,0]]; Q.forEach(p=>{ const w=[p[0]-c[0],p[1]-c[1],p[2]-c[2]]; for(let i=0;i<3;i++) for(let j=0;j<3;j++) C[i][j]+=w[i]*w[j]; });
   let d=[1,0.37,0.21]; for(let it=0;it<80;it++){ const nd=[0,0,0]; for(let i=0;i<3;i++) nd[i]=C[i][0]*d[0]+C[i][1]*d[1]+C[i][2]*d[2]; d=v3.unit(nd); }
   return { c, d };
+}
+
+function cintrageRebuild(){
+  const b = cintrage.base ? cintrage.base[Math.min(cintrage.sel, cintrage.base.length-1)] : null;
+  if(!b){ return; }
+  let pts = b.points.map(p=>p.slice()), rad = b.radii.slice();
+  if(cintrage.inverse){ pts.reverse(); rad.reverse(); }
+  const ext = (i,j,mm)=>{ if(!mm) return; const d = v3.unit(v3.sub(pts[i],pts[j])); pts[i] = v3.add(pts[i], v3.mul(d,mm)); };
+  ext(0,1,cintrage.adjStart||0); ext(pts.length-1,pts.length-2,cintrage.adjEnd||0);
+  cintrage.raw = { ...b, points:pts, radii:rad };
 }
 
 function cintrageMetrics(raw, rImpose){
@@ -2394,6 +2446,12 @@ function renderCintrage(){
         <div class="field"><label>Rayon de cintrage imposé (mm) — vide = rayon lu dans le fichier</label><input type="number" step="0.1" min="0" id="cint-rayon" value="${cintrage.rayonImpose||''}" placeholder="${raw.radii.length ? cintrageFmt(raw.radii[0],1) : ''}"></div>
         <div class="field" style="display:flex;align-items:flex-end;"><button class="btn primary" id="cint-export">Exporter en Excel</button></div>
       </div>
+      <div class="grid3" style="margin-bottom:10px;">
+        ${cintrage.base && cintrage.base.length>1 ? `<div class="field"><label>Tube du fichier</label><select id="cint-sel">${cintrage.base.map((b,i)=>`<option value="${i}" ${i===cintrage.sel?'selected':''}>Tube ${i+1} — ${b.points.length-2} cintre(s), ${cintrageFmt(b.length,0)} mm${b.name?' ('+escapeHtml(String(b.name).slice(0,28))+')':''}</option>`).join('')}</select></div>` : '<div></div>'}
+        <div class="field"><label>Prolonger (+) / raccourcir (−) le départ (mm)</label><input type="number" step="0.1" id="cint-adj0" value="${cintrage.adjStart||''}" placeholder="0"></div>
+        <div class="field"><label>Prolonger (+) / raccourcir (−) la fin (mm)</label><input type="number" step="0.1" id="cint-adj1" value="${cintrage.adjEnd||''}" placeholder="0"></div>
+      </div>
+      <label style="font-size:12px;color:var(--ink-dim);display:flex;gap:6px;align-items:center;margin-bottom:12px;"><input type="checkbox" id="cint-inv" ${cintrage.inverse?'checked':''}> Inverser le sens (partir de l'autre extrémité)</label>
       ${m.negative ? `<div style="color:var(--danger);font-size:12px;margin-bottom:8px;">Attention : avec ce rayon, une longueur droite devient négative (cintres trop rapprochés).</div>` : ''}
       ` : ''}
     </div>
@@ -2430,13 +2488,15 @@ function renderCintrage(){
   document.getElementById('cint-file').onchange = async (e)=>{
     const file = e.target.files[0];
     if(!file) return;
-    cintrage.fileName = file.name; cintrage.raw = null; cintrage.error = ''; cintrage.wire = null; cintrage.rayonImpose = null;
+    cintrage.fileName = file.name; cintrage.raw = null; cintrage.base = null; cintrage.error = ''; cintrage.wire = null; cintrage.rayonImpose = null;
     try{
       const text = await file.text();
       try{ cintrage.wire = parseStepWireframe(text); }catch(err){ console.warn('Fil de fer STEP indisponible', err); }
-      let splineErr = null;
-      if(/B_SPLINE_SURFACE/.test(text)){ try{ cintrage.raw = parseStepTubeSpline(text); }catch(err){ splineErr = err; console.warn('Lecture B-spline impossible', err); } }
-      if(!cintrage.raw){ try{ cintrage.raw = parseStepTube(text); }catch(err){ if(splineErr) throw splineErr; throw err; } }
+      let splineErr = null; let list = null;
+      if(/B_SPLINE_SURFACE/.test(text)){ try{ list = parseStepTubeSplineAll(text); }catch(err){ splineErr = err; console.warn('Lecture B-spline impossible', err); } }
+      if(!list){ try{ list = [parseStepTube(text)]; }catch(err){ if(splineErr) throw splineErr; throw err; } }
+      cintrage.base = list; cintrage.sel = 0; cintrage.inverse = false; cintrage.adjStart = 0; cintrage.adjEnd = 0;
+      cintrageRebuild();
       toast('Tube analysé');
     }catch(err){
       console.error(err);
@@ -2445,6 +2505,9 @@ function renderCintrage(){
     e.target.value = '';
     renderCintrage();
   };
+  const csel = document.getElementById('cint-sel'); if(csel) csel.onchange = ()=>{ cintrage.sel = +csel.value; cintrageRebuild(); renderCintrage(); };
+  const cinv = document.getElementById('cint-inv'); if(cinv) cinv.onchange = ()=>{ cintrage.inverse = cinv.checked; cintrageRebuild(); renderCintrage(); };
+  [['cint-adj0','adjStart'],['cint-adj1','adjEnd']].forEach(([id,k])=>{ const el = document.getElementById(id); if(el) el.onchange = ()=>{ cintrage[k] = parseFloat(el.value)||0; cintrageRebuild(); renderCintrage(); }; });
   const rayon = document.getElementById('cint-rayon');
   if(rayon) rayon.onchange = ()=>{ const v = parseFloat(rayon.value); cintrage.rayonImpose = v>0 ? v : null; renderCintrage(); };
   const exp = document.getElementById('cint-export');
@@ -2721,7 +2784,12 @@ function stepSheetParse(text){
     if(f.kind!=='other') return;
     const pts = []; f.loops.forEach(l=>l.oes.forEach(o=>{ const e = edgeInfo(o.edge); if(e.p1) pts.push(e.p1); if(e.p2) pts.push(e.p2); }));
     let diag = 0; for(let i=0;i<pts.length;i++) for(let j=i+1;j<pts.length;j++){ const d = v3.len(v3.sub(pts[i],pts[j])); if(d>diag) diag=d; }
-    if(diag > 6*thickness) bigOthers++;
+    if(diag <= 6*thickness) return;
+    // Paroi de chant d'une découpe courbe (fente, lumière, contour spline) : elle ne dépasse pas l'épaisseur de la tôle
+    // dans la direction de la normale des faces planes voisines -> la découpe se lit déjà sur le contour des faces planes.
+    const nbrs = []; f.loops.forEach(l=>l.oes.forEach(o=>{ (edgeFaces[o.edge]||[]).forEach(x=>{ if(faces[x]!==f && faces[x].kind==='plane' && !nbrs.includes(x)) nbrs.push(x); }); }));
+    const isWall = nbrs.length>=2 && nbrs.filter(x=>{ const n = faces[x].n; let lo=Infinity, hi=-Infinity; pts.forEach(p=>{ const d = v3.dot(p,n); if(d<lo)lo=d; if(d>hi)hi=d; }); return (hi-lo) <= 1.08*thickness; }).length>=2;
+    if(!isWall) bigOthers++;
   });
   if(bigOthers) throw new Error(`Ce STEP contient ${bigOthers} grande(s) face(s) à surface gauche (B-spline, sphère, cône, tore…) en plus des plans et cylindres : congés d'angle, raccords de pli ou bossages. Le dépliage automatique ne gère que les plans et les plis cylindriques ; utilise le DXF du développé exporté de ta CAO (fonction « mise à plat »).`);
 
@@ -3188,6 +3256,120 @@ function laserDevisCsv(dv){
   return [cols.map(esc).join(';')].concat(rows.map(r=>r.map(esc).join(';'))).join('\r\n');
 }
 
+/* ---- Contrôle du développé par le plan PDF (vue dépliée à l'échelle 1:1) ----
+   Le plan CATIA est vectoriel : on lit les tracés de la page avec pdf.js, on les regroupe en ensembles connexes
+   (une vue = un ensemble) et on cherche la vue dont l'encombrement ressemble le plus au développé calculé. */
+let laserPdf = { name:'', buf:null, clusters:null, error:'', loading:false };
+function loadPdfJs(){
+  return new Promise((res,rej)=>{
+    if(window.pdfjsLib) return res(window.pdfjsLib);
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    s.onload = ()=>{ try{ window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; }catch(e){} res(window.pdfjsLib); };
+    s.onerror = ()=> rej(new Error('Lecteur PDF indisponible (connexion internet nécessaire).'));
+    document.head.appendChild(s);
+  });
+}
+async function pdfPathBoxes(lib, buf){
+  const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+  const page = await doc.getPage(1);
+  const ol = await page.getOperatorList();
+  const O = lib.OPS, mm = 25.4/72;
+  const mul = (m,n)=>[m[0]*n[0]+m[2]*n[1], m[1]*n[0]+m[3]*n[1], m[0]*n[2]+m[2]*n[3], m[1]*n[2]+m[3]*n[3], m[0]*n[4]+m[2]*n[5]+m[4], m[1]*n[4]+m[3]*n[5]+m[5]];
+  let ctm = [1,0,0,1,0,0]; const stack = []; const boxes = [];
+  const NPTS = {}; // nb de nombres par commande (format pdf.js 3.x)
+  NPTS[O.moveTo]=2; NPTS[O.lineTo]=2; NPTS[O.curveTo]=6; NPTS[O.curveTo2]=4; NPTS[O.curveTo3]=4; NPTS[O.closePath]=0; NPTS[O.rectangle]=4;
+  for(let i=0;i<ol.fnArray.length;i++){
+    const fn = ol.fnArray[i], a = ol.argsArray[i];
+    if(fn===O.save) stack.push(ctm.slice());
+    else if(fn===O.restore) ctm = stack.pop() || ctm;
+    else if(fn===O.transform) ctm = mul(ctm, a);
+    else if(fn===O.constructPath){
+      const next = ol.fnArray[i+1]; if(next===O.clip || next===O.eoClip || next===O.endPath) continue;
+      const subs = []; let cur = null;
+      const add = (x,y)=>{ if(!cur){ cur=[]; subs.push(cur); } cur.push([x,y]); };
+      if(Array.isArray(a[0])){ // pdf.js 3.x : [ops, coords]
+        const ops = a[0], co = a[1]; let k = 0;
+        ops.forEach(op=>{ const n = NPTS[op]; if(n==null) return;
+          if(op===O.moveTo){ cur = null; }
+          if(op===O.rectangle){ cur = null; const x=co[k], y=co[k+1], w=co[k+2], h=co[k+3]; add(x,y); add(x+w,y+h); cur = null; }
+          else for(let j=0;j<n;j+=2) add(co[k+j], co[k+j+1]);
+          k += n; });
+      }else{ // pdf.js 4+ : [op, [données], boîte] ; données = commande puis coordonnées (0 déplacer, 1 ligne, 2 courbe, 3 quadratique, 4 fermer)
+        const d = a[1] && a[1][0]; if(!d) continue; let k = 0;
+        while(k<d.length){ const c = d[k++]; const n = c===0||c===1 ? 2 : c===2 ? 6 : c===3 ? 4 : 0; if(c===0) cur = null; for(let j=0;j<n;j+=2) add(d[k+j], d[k+j+1]); k += n; }
+      }
+      subs.forEach(xs=>{
+        let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+        xs.forEach(([x,y])=>{ const X = (ctm[0]*x+ctm[2]*y+ctm[4])*mm, Y = (ctm[1]*x+ctm[3]*y+ctm[5])*mm; if(X<x0)x0=X; if(X>x1)x1=X; if(Y<y0)y0=Y; if(Y>y1)y1=Y; });
+        if(isFinite(x0)) boxes.push([x0,y0,x1,y1]);
+      });
+    }
+  }
+  return boxes;
+}
+function pdfClusters(boxes, tol){
+  tol = tol || 1.5;
+  // cadre, repères de zones et cartouche du plan exclus : traits très longs ou collés au bord de la feuille
+  let X0=Infinity,Y0=Infinity,X1=-Infinity,Y1=-Infinity; boxes.forEach(b=>{ X0=Math.min(X0,b[0]); Y0=Math.min(Y0,b[1]); X1=Math.max(X1,b[2]); Y1=Math.max(Y1,b[3]); });
+  const BAND = 22;
+  boxes = boxes.filter(b=> Math.max(b[2]-b[0], b[3]-b[1]) < 700 && b[0]>X0+BAND && b[2]<X1-BAND && b[1]>Y0+BAND && b[3]<Y1-BAND);
+  const n = boxes.length, par = boxes.map((_,i)=>i);
+  const find = i=>{ while(par[i]!==i){ par[i]=par[par[i]]; i=par[i]; } return i; };
+  const CELL = 25, grid = new Map();
+  boxes.forEach((b,i)=>{
+    for(let cx=Math.floor((b[0]-tol)/CELL); cx<=Math.floor((b[2]+tol)/CELL); cx++) for(let cy=Math.floor((b[1]-tol)/CELL); cy<=Math.floor((b[3]+tol)/CELL); cy++){
+      const k = cx+','+cy; let arr = grid.get(k); if(!arr){ arr=[]; grid.set(k,arr); }
+      for(const j of arr){ const c = boxes[j]; if(b[0]-tol<=c[2] && b[2]+tol>=c[0] && b[1]-tol<=c[3] && b[3]+tol>=c[1]){ const a1=find(i), a2=find(j); if(a1!==a2) par[a1]=a2; } }
+      arr.push(i);
+    }
+  });
+  const cl = new Map();
+  boxes.forEach((b,i)=>{ const r = find(i); let c = cl.get(r); if(!c){ c={x0:b[0],y0:b[1],x1:b[2],y1:b[3],n:0}; cl.set(r,c); } c.x0=Math.min(c.x0,b[0]); c.y0=Math.min(c.y0,b[1]); c.x1=Math.max(c.x1,b[2]); c.y1=Math.max(c.y1,b[3]); c.n++; });
+  return Array.from(cl.values()).map(c=>({ w:c.x1-c.x0, h:c.y1-c.y0, n:c.n })).filter(c=>Math.max(c.w,c.h)>=20 && Math.max(c.w,c.h)<=4000 && c.n>=5);
+}
+/* Cherche, parmi les vues du plan, celle qui ressemble au développé (L × H en mm) */
+function pdfMatchDev(clusters, L, H){
+  let best = null;
+  (clusters||[]).forEach(c=>{
+    [[c.w,c.h],[c.h,c.w]].forEach(([w,h])=>{
+      const sc = Math.abs(w-L)/L + Math.abs(h-H)/Math.max(H,10);
+      if(!best || sc<best.score) best = { score:sc, w, h, dL:L-w, dH:H-h };
+    });
+  });
+  return best && best.score < 0.3 ? best : null;
+}
+async function laserPdfLoad(file){
+  laserPdf = { name:file.name, buf:null, clusters:null, error:'', loading:true };
+  try{
+    const buf = await file.arrayBuffer(); laserPdf.buf = buf;
+    const lib = await loadPdfJs();
+    laserPdf.clusters = pdfClusters(await pdfPathBoxes(lib, buf));
+    if(!laserPdf.clusters.length) laserPdf.error = 'Aucune vue vectorielle exploitable dans ce PDF (plan scanné ou en image ?).';
+  }catch(err){ console.error(err); laserPdf.error = err.message; }
+  laserPdf.loading = false;
+}
+function laserPdfReport(){
+  if(!laserPdf.name) return '';
+  const esc = escapeHtml, f1 = v=>(Math.round(v*10)/10).toFixed(1).replace('.',',');
+  let body;
+  if(laserPdf.loading) body = 'Lecture du plan en cours…';
+  else if(laserPdf.error) body = `<span style="color:var(--danger);">${esc(laserPdf.error)}</span>`;
+  else{
+    const idxs = laserStepSel==='all' ? laserStepResults.map((r,i)=>r.error?-1:i).filter(i=>i>=0) : [laserStepSel];
+    body = idxs.map(i=>{
+      const r = laserStepResults[i]; if(!r||r.error) return '';
+      const L = r.bbox.maxX-r.bbox.minX, H = r.bbox.maxY-r.bbox.minY;
+      const m = pdfMatchDev(laserPdf.clusters, Math.max(L,H), Math.min(L,H));
+      const lab = idxs.length>1 ? `Pièce ${i+1} : ` : '';
+      if(!m) return `${lab}aucune vue du plan ne correspond au développé calculé (${f1(Math.max(L,H))} × ${f1(Math.min(L,H))} mm) — plan à une autre échelle, ou développé différent.`;
+      const tol = Math.max(3, 0.01*m.w), ok = Math.abs(m.dL)<=tol && Math.abs(m.dH)<=Math.max(3,0.03*m.h);
+      return `${lab}vue dépliée du plan : <b>${f1(m.w)} × ${f1(m.h)} mm</b> · développé calculé : <b>${f1(Math.max(L,H))} × ${f1(Math.min(L,H))} mm</b> · écart ${m.dL>=0?'+':'−'}${f1(Math.abs(m.dL))} / ${m.dH>=0?'+':'−'}${f1(Math.abs(m.dH))} mm — <b style="color:${ok?'var(--ok,#2a7d3f)':'var(--danger)'};">${ok?'conforme au plan':'à vérifier (écart > tolérance)'}</b>`;
+    }).filter(Boolean).join('<br>');
+  }
+  return `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--line);color:var(--ink-dim);line-height:1.6;"><b style="color:var(--ink);">Contrôle par le plan</b> (${esc(laserPdf.name)}) : ${body}</div>`;
+}
+
 function laserStepBuild(){
   const M = laserStepModel;
   laserStepResults = M.solids.map((S,i)=>{ try{ return stepSheetUnfold(M, laserStepK, i); }catch(err){ return { error: err.message }; } });
@@ -3227,6 +3409,10 @@ function renderDecoupeLaser(){
         ${laserStepResults.some(r=>r.error) ? `<div style="color:var(--danger);font-size:12px;margin-top:6px;">${laserStepResults.map((r,i)=>r.error?'Pièce '+(i+1)+' : '+escapeHtml(r.error):'').filter(Boolean).join('<br>')}</div>` : ''}` : ''}
         <div class="field" style="margin:10px 0 0;max-width:260px;"><label>Facteur K (pli)</label><input type="number" id="laser-k" step="0.01" min="0" max="0.5" value="${laserStepK}"></div>
         <div style="color:var(--ink-dim);font-size:11px;margin-top:6px;">Longueur de pli à plat = (rayon intérieur + K × épaisseur) × angle. K ≈ 0,33 à 0,45 selon la matière et l'outil de pliage.</div>
+        <div class="field" style="margin:12px 0 0;"><label>Plan PDF de la pièce (optionnel) — contrôle du développé</label>
+          <input type="file" id="laser-pdf" accept=".pdf,application/pdf">
+          <span class="hint" style="font-size:11px;color:var(--ink-dim);display:block;margin-top:4px;">Plan vectoriel avec la vue dépliée à l'échelle 1:1 (export CATIA / SolidWorks). L'app compare son encombrement au développé calculé.</span></div>
+        ${laserPdfReport()}
       </div>` : ''}
 
       <div class="grid2">
@@ -3406,6 +3592,7 @@ function renderDecoupeLaser(){
       const isStep = /\.(step|stp)$/i.test(file.name);
       if(isStep){
         laserStepModel = stepSheetParse(text);
+        laserPdf = { name:'', buf:null, clusters:null, error:'', loading:false };
         laserStepSel = 'all';
         laserStepBuild();
         // épaisseur : on prend l'épaisseur du tableau de vitesses la plus proche de celle du STEP
@@ -3428,6 +3615,8 @@ function renderDecoupeLaser(){
       toast('Impossible de lire ce fichier : ' + err.message);
     }
   };
+  const laserPdfIn = document.getElementById('laser-pdf');
+  if(laserPdfIn) laserPdfIn.onchange = async (e)=>{ const f = e.target.files[0]; if(!f) return; laserPdf = { name:f.name, buf:null, clusters:null, error:'', loading:true }; renderDecoupeLaser(); await laserPdfLoad(f); renderDecoupeLaser(); };
   const laserPiece = document.getElementById('laser-piece');
   if(laserPiece) laserPiece.onchange = ()=>{ laserStepSel = laserPiece.value==='all' ? 'all' : parseInt(laserPiece.value,10); try{ laserStepBuild(); }catch(err){ toast(err.message); } renderDecoupeLaser(); };
   const laserK = document.getElementById('laser-k');
