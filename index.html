@@ -415,7 +415,8 @@ let currentTab = 'inventaire';
    v4.9 (13/11) Devis laser : surface réelle du contour, emprise des arcs corrigée, détail de la ligne matière, taux laser 150 €/h ; Imbrication : retrait de pièces, plusieurs fichiers, tôles supplémentaires automatiques
    v5.8 (26/11) Nouvel onglet Développé du STEP : viewer, export DXF (COUPE / PLIS / TEXTE), bibliothèque des développés enregistrés
    v5.7 (26/11) Nouvel onglet Tôlerie aéronautique : relecture des gammes Clipper (PDF), gamme modifiable, simulation par quantité, export Excel
-   v5.9 (26/11) Développé : construction depuis un plan PDF vectoriel (choix de la vue, échelle, export DXF, bibliothèque)
+   v6.0 (26/11) Cintrage : devis (programme, prise en charge, matière en barres, débit, cintrage, nettoyage, marge) + export CSV
+   v5.9 (26/11) Développé : construction depuis un plan PDF vectoriel (choix de la vue, échelle, export DXF, bibliothèque) ; perçages intérieurs rattachés à la vue, petits formats CATIA, cercles mieux reconnus
    v5.8 (26/11) Nouvel onglet Découpe « Développé du STEP » : viewer, export DXF (COUPE/PLIS/TEXTE), bibliothèque
    v5.6 (25/11) Découpe laser STEP : plan PDF optionnel, contrôle automatique de l'encombrement du développé (vue dépliée 1:1)
    v5.5 (25/11) Développé STEP : découpes à contour courbe (fentes, lumières en B-spline / extrusion) acceptées
@@ -424,7 +425,7 @@ let currentTab = 'inventaire';
    v5.2 (19/11) STEP : nombre de plis calculé (plis distincts, pièces cumulées) et affiché dans les résultats
    v5.1 (19/11) STEP à plusieurs pièces (sélection ou somme), épaisseur lue sur la face opposée, K par défaut 0,35 validé sur un plan CATIA
    v5.0 (19/11) Nouvel onglet Cintrage « Tube cintré (STEP) » (viewer 3D, points d'intersection, LRA, export Excel) ; Découpe laser : lecture STEP de tôle pliée avec calcul du développé (facteur K) */
-const APP_VERSION = '5.9';
+const APP_VERSION = '6.0';
 const APP_VERSION_DATE = '26/11/2026';
 
 /* ---------------------------------------------------------
@@ -2656,6 +2657,47 @@ function renderAero(){
   };
 }
 
+/* ---------------------------------------------------------
+   DEVIS CINTRAGE — programme, prise en charge, matière (barres), débit, cintrage, nettoyage, marge ; export CSV
+   Valeurs par défaut modifiables (à ajuster aux temps et taux de l'atelier).
+--------------------------------------------------------- */
+let cintDevis = { reference:'', client:'', qte:1, programmeEur:30, priseEnChargeEur:0, prixMetre:null, longueurBarre:6000, minMatiere:150,
+  coupeMm:5, tempsDebit:1, tauxDebit:60, reglageCintrage:15, tempsParCintre:1, tauxCintrage:70, tempsNettoyage:1, tauxNettoyage:50, marge:0.25 };
+function cintTranche(od){ return od<20 ? '< 20 mm' : od<45 ? '20 – 45 mm' : od<=63 ? '45 – 63 mm' : '> 63 mm'; }
+function cintDevisCompute(m, raw){
+  const d = cintDevis, qte = Math.max(1, parseInt(d.qte)||1), nb = m.bends.length, LRA = m.LRA, fr = n=>(Math.round(n*100)/100).toFixed(2).replace('.',',');
+  const lb = Math.max(100, d.longueurBarre||6000), lp = LRA + (d.coupeMm||0);
+  const parBarre = Math.floor(lb/lp);
+  const barres = parBarre>=1 ? Math.ceil(qte/parBarre) : qte*Math.ceil(lp/lb);
+  const prixM = d.prixMetre>0 ? d.prixMetre : 0;
+  const matBrut = barres*lb/1000*prixM, matTotal = prixM>0 ? Math.max(matBrut, d.minMatiere||0) : 0;
+  const debitUnit = (d.tempsDebit||0)/60*(d.tauxDebit||0);
+  const cintTotal = ((d.reglageCintrage||0) + qte*nb*(d.tempsParCintre||0))/60*(d.tauxCintrage||0);
+  const nettUnit = (d.tempsNettoyage||0)/60*(d.tauxNettoyage||0);
+  const lignes = [
+    { code:'PROG', libelle:'Programme', qte:1, pu:d.programmeEur||0 },
+    { code:'PEC', libelle:'Prise en charge', qte:1, pu:d.priseEnChargeEur||0 },
+    { code:'MAT', libelle: prixM>0 ? `Matière Ø${(raw.OD||0).toFixed(1).replace('.',',')} — ${barres} barre(s) de ${(lb/1000).toFixed(1).replace('.',',')} m × ${fr(prixM)} €/m${matTotal>matBrut?' (minimum matière)':''}` : 'Matière — prix au mètre non renseigné', qte:1, pu:matTotal },
+    { code:'DEBIT', libelle:`Débit — ${fr(d.tempsDebit||0)} min/pièce à ${fr(d.tauxDebit||0)} €/h`, qte, pu:debitUnit },
+    { code:'CINTRAGE', libelle:`Cintrage — réglage ${fr(d.reglageCintrage||0)} min + ${nb} cintre(s) × ${fr(d.tempsParCintre||0)} min par pièce à ${fr(d.tauxCintrage||0)} €/h`, qte, pu:cintTotal/qte },
+    { code:'NETTOYAGE', libelle:`Nettoyage / ébavurage — ${fr(d.tempsNettoyage||0)} min/pièce à ${fr(d.tauxNettoyage||0)} €/h`, qte, pu:nettUnit },
+  ];
+  lignes.forEach(l=> l.total = l.qte*l.pu);
+  const sousTotal = lignes.reduce((a,l)=>a+l.total,0), margeEur = sousTotal*(d.marge||0), totalHt = sousTotal+margeEur;
+  const tempsTotalMin = qte*(d.tempsDebit||0) + (d.reglageCintrage||0) + qte*nb*(d.tempsParCintre||0) + qte*(d.tempsNettoyage||0);
+  return { qte, nb, LRA, parBarre, barres, prixM, matBrut, matTotal, lignes, sousTotal, margeEur, totalHt, prixPiece:totalHt/qte, tempsTotalMin, tranche:cintTranche(raw.OD||0) };
+}
+function cintDevisCsv(dv, raw){
+  const fr = n => (Math.round(n*100)/100).toFixed(2).replace('.',','), esc = v => `"${String(v==null?'':v).replace(/"/g,'""')}"`;
+  const date = new Date().toLocaleDateString('fr-FR');
+  const cols = ['Date','Référence','Client','Diamètre (mm)','LRA (mm)','Cintres','Ligne','Libellé','Quantité','Prix unitaire HT','Total HT'];
+  const base = [date, cintDevis.reference, cintDevis.client, (raw.OD||0).toFixed(1).replace('.',','), dv.LRA.toFixed(1).replace('.',','), dv.nb];
+  const rows = dv.lignes.map(l=> base.concat([l.code, l.libelle, l.qte, fr(l.pu), fr(l.total)]));
+  rows.push(base.concat(['MARGE', `Marge ${Math.round((cintDevis.marge||0)*100)} %`, 1, fr(dv.margeEur), fr(dv.margeEur)]));
+  rows.push(base.concat(['TOTAL', 'Total devis HT', 1, fr(dv.totalHt), fr(dv.totalHt)]));
+  return [cols.map(esc).join(';')].concat(rows.map(r=>r.map(esc).join(';'))).join('\r\n');
+}
+
 function renderCintrage(){
   const view = document.getElementById('view');
   const raw = cintrage.raw;
@@ -2725,13 +2767,58 @@ function renderCintrage(){
       <thead><tr><th>Cintre</th><th>Y — droite avant (mm)</th><th>B — rotation de plan (°)</th><th>C — angle (°)</th></tr></thead>
       <tbody>${m.bends.map((b,k)=>`<tr><td>${b.i}</td><td>${cintrageFmt(m.straights[k].len,2)}</td><td>${b.B==null?'0,00':cintrageFmt(b.B,2)}</td><td>${cintrageFmt(b.deg,2)}</td></tr>`).join('')}
       <tr><td>Reste droit final</td><td>${cintrageFmt(m.straights[m.straights.length-1].len,2)}</td><td></td><td></td></tr></tbody>
-    </table></div>` : ''}
+    </table></div>
+    ${(()=>{
+      const dv = cintDevisCompute(m, raw), eur = n=>n.toFixed(2).replace('.',',')+' €', D = cintDevis, num = (id,lab,val,step)=>`<div class="field"><label>${lab}</label><input type="number" step="${step||'0.1'}" min="0" id="${id}" value="${val==null?'':val}"></div>`;
+      return `
+    <h3 style="font-family:var(--display);font-size:14px;letter-spacing:.3px;margin:30px 0 10px;color:var(--ink-dim);">Devis cintrage</h3>
+    <div class="grid3">
+      <div class="field"><label>Référence pièce</label><input type="text" id="cd-ref" value="${escapeHtml(D.reference)}"></div>
+      <div class="field"><label>Client</label><input type="text" id="cd-client" value="${escapeHtml(D.client)}"></div>
+      ${num('cd-qte','Quantité',dv.qte,'1')}
+    </div>
+    <div class="grid3">
+      ${num('cd-prog','Programme (forfait €)',D.programmeEur,'0.01')}
+      ${num('cd-pec','Prise en charge (forfait €)',D.priseEnChargeEur,'0.01')}
+      ${num('cd-prixm','Prix du tube (€/m)',D.prixMetre,'0.01')}
+    </div>
+    <div class="grid3">
+      ${num('cd-barre','Longueur de barre (mm)',D.longueurBarre,'100')}
+      ${num('cd-minmat','Minimum de facturation matière (€)',D.minMatiere,'1')}
+      ${num('cd-coupe','Chute par coupe (mm)',D.coupeMm,'0.5')}
+    </div>
+    <div class="grid3">
+      ${num('cd-tdeb','Débit — temps (min / pièce)',D.tempsDebit,'0.1')}
+      ${num('cd-xdeb','Débit — taux (€/h)',D.tauxDebit,'1')}
+      <div></div>
+    </div>
+    <div class="grid3">
+      ${num('cd-treg','Cintrage — réglage (min / série)',D.reglageCintrage,'1')}
+      ${num('cd-tcin','Cintrage — temps par cintre (min)',D.tempsParCintre,'0.1')}
+      ${num('cd-xcin','Cintrage — taux (€/h)',D.tauxCintrage,'1')}
+    </div>
+    <div class="grid3">
+      ${num('cd-tnet','Nettoyage — temps (min / pièce)',D.tempsNettoyage,'0.1')}
+      ${num('cd-xnet','Nettoyage — taux (€/h)',D.tauxNettoyage,'1')}
+      ${num('cd-marge','Marge (%)',Math.round((D.marge||0)*100),'1')}
+    </div>
+    <div class="table-wrap"><table style="min-width:420px;">
+      <thead><tr><th>Ligne</th><th>Quantité</th><th>Prix unitaire HT</th><th>Total HT</th></tr></thead>
+      <tbody>
+        ${dv.lignes.map(l=>`<tr><td>${escapeHtml(l.libelle)}</td><td>${l.qte}</td><td>${eur(l.pu)}</td><td>${eur(l.total)}</td></tr>`).join('')}
+        <tr><td>Marge ${Math.round((D.marge||0)*100)} %</td><td>1</td><td>${eur(dv.margeEur)}</td><td>${eur(dv.margeEur)}</td></tr>
+        <tr style="font-weight:600;"><td colspan="3">Total devis HT</td><td>${eur(dv.totalHt)}</td></tr>
+      </tbody>
+    </table></div>
+    <div style="font-size:12px;color:var(--ink-dim);margin:8px 0 12px;line-height:1.6;">Soit <b style="color:var(--ink);">${eur(dv.prixPiece)}</b> la pièce. Tube Ø ${cintrageFmt(raw.OD,1)} mm (tranche ${dv.tranche}) · LRA ${cintrageFmt(dv.LRA,1)} mm + chute → ${dv.parBarre>=1?dv.parBarre+' pièce(s) par barre':'plusieurs barres par pièce'}, ${dv.barres} barre(s) pour ${dv.qte} pièce(s). Temps total estimé : ${fmtMin(dv.tempsTotalMin)}. ${dv.prixM>0?'':'<b style="color:var(--danger);">Renseigne le prix du tube pour chiffrer la matière.</b> '}Les temps et taux par défaut sont indicatifs : à régler selon l'atelier.</div>
+    <div class="modal-actions" style="justify-content:flex-start;margin-top:0;"><button class="btn primary" id="cd-csv">Exporter le devis en CSV</button></div>`;
+    })()}` : ''}
   `;
 
   document.getElementById('cint-file').onchange = async (e)=>{
     const file = e.target.files[0];
     if(!file) return;
-    cintrage.fileName = file.name; cintrage.raw = null; cintrage.base = null; cintrage.error = ''; cintrage.wire = null; cintrage.rayonImpose = null;
+    cintrage.fileName = file.name; cintDevis.reference = file.name.replace(/\.(step|stp)$/i,''); cintrage.raw = null; cintrage.base = null; cintrage.error = ''; cintrage.wire = null; cintrage.rayonImpose = null;
     try{
       const text = await file.text();
       try{ cintrage.wire = parseStepWireframe(text); }catch(err){ console.warn('Fil de fer STEP indisponible', err); }
@@ -2755,6 +2842,13 @@ function renderCintrage(){
   if(rayon) rayon.onchange = ()=>{ const v = parseFloat(rayon.value); cintrage.rayonImpose = v>0 ? v : null; renderCintrage(); };
   const exp = document.getElementById('cint-export');
   if(exp) exp.onclick = ()=> cintrageExport(m);
+  [['cd-ref','reference','t'],['cd-client','client','t'],['cd-qte','qte','q'],['cd-prog','programmeEur','n'],['cd-pec','priseEnChargeEur','n'],['cd-prixm','prixMetre','p'],['cd-barre','longueurBarre','n'],['cd-minmat','minMatiere','n'],['cd-coupe','coupeMm','n'],
+    ['cd-tdeb','tempsDebit','n'],['cd-xdeb','tauxDebit','n'],['cd-treg','reglageCintrage','n'],['cd-tcin','tempsParCintre','n'],['cd-xcin','tauxCintrage','n'],['cd-tnet','tempsNettoyage','n'],['cd-xnet','tauxNettoyage','n'],['cd-marge','marge','m']].forEach(([id,k,t])=>{
+    const el = document.getElementById(id); if(!el) return;
+    el.onchange = ()=>{ const v = el.value; cintDevis[k] = t==='t' ? v.trim() : t==='q' ? Math.max(1, parseInt(v)||1) : t==='p' ? ((v.trim()!==''&&parseFloat(v)>=0)?parseFloat(v):null) : t==='m' ? (parseFloat(v)||0)/100 : (parseFloat(v)||0); renderCintrage(); }; });
+  const cdCsv = document.getElementById('cd-csv');
+  if(cdCsv) cdCsv.onclick = ()=>{ const dv = cintDevisCompute(m, raw); const blob = new Blob(['﻿'+cintDevisCsv(dv, raw)], { type:'text/csv;charset=utf-8' }); const a = document.createElement('a');
+    const nom = (cintDevis.reference || (cintrage.fileName||'devis').replace(/\.(step|stp)$/i,'')).replace(/[^\w\-]+/g,'_'); a.href = URL.createObjectURL(blob); a.download = `devis-cintrage-${nom}.csv`; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 4000); };
   cintrageAttachViewer();
 }
 
@@ -3657,8 +3751,8 @@ function devGeometry(r, tolIn){
     if(chain.length>3 && same(chain[0],chain[chain.length-1])) loops.push(chain.slice(0,-1)); else open.push(chain);
   }
   // cercles : tous les points à égale distance du centre
-  const circ = pts=>{ if(pts.length<12) return null; let cx=0,cy=0; pts.forEach(p=>{cx+=p.x;cy+=p.y;}); cx/=pts.length; cy/=pts.length;
-    const rr = pts.map(p=>Math.hypot(p.x-cx,p.y-cy)); const m = rr.reduce((a,b)=>a+b,0)/rr.length; return rr.every(x=>Math.abs(x-m)<0.02*Math.max(m,1)) ? { cx, cy, r:m } : null; };
+  const circ = pts=>{ if(pts.length<12) return null; let a0=Infinity,b0=Infinity,a1=-Infinity,b1=-Infinity; pts.forEach(p=>{ a0=Math.min(a0,p.x); a1=Math.max(a1,p.x); b0=Math.min(b0,p.y); b1=Math.max(b1,p.y); }); const cx=(a0+a1)/2, cy=(b0+b1)/2; if(Math.abs((a1-a0)-(b1-b0))>0.04*Math.max(a1-a0,b1-b0,1)) return null;
+    const rr = pts.map(p=>Math.hypot(p.x-cx,p.y-cy)); const m = rr.reduce((a,b)=>a+b,0)/rr.length; return rr.every(x=>Math.abs(x-m)<0.03*Math.max(m,1)) ? { cx, cy, r:m } : null; };
   const out = loops.map(pts=>{ const c = circ(pts); return c ? { circle:c } : { pts }; });
   const bends = devBendLines(r);
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
@@ -3761,7 +3855,8 @@ async function pdfSubpaths(lib, buf){
 function pdfGroupViews(paths){
   const bx = paths.map(p=>{ let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity; p.forEach(q=>{ if(q.x<x0)x0=q.x; if(q.x>x1)x1=q.x; if(q.y<y0)y0=q.y; if(q.y>y1)y1=q.y; }); return [x0,y0,x1,y1]; });
   let X0=Infinity,Y0=Infinity,X1=-Infinity,Y1=-Infinity; bx.forEach(b=>{ X0=Math.min(X0,b[0]); Y0=Math.min(Y0,b[1]); X1=Math.max(X1,b[2]); Y1=Math.max(Y1,b[3]); });
-  const BAND = 22, keep = []; bx.forEach((b,i)=>{ if(Math.max(b[2]-b[0],b[3]-b[1])<700 && b[0]>X0+BAND && b[2]<X1-BAND && b[1]>Y0+BAND && b[3]<Y1-BAND) keep.push(i); });
+  const BAND = Math.min(22, 0.04*Math.min(X1-X0, Y1-Y0)), keep = []; // bande du cadre / cartouche, réduite sur les petits formats
+  bx.forEach((b,i)=>{ if(Math.max(b[2]-b[0],b[3]-b[1])<700 && b[0]>X0+BAND && b[2]<X1-BAND && b[1]>Y0+BAND && b[3]<Y1-BAND) keep.push(i); });
   const par = {}; keep.forEach(i=>par[i]=i); const find = i=>{ while(par[i]!==i){ par[i]=par[par[i]]; i=par[i]; } return i; };
   const tol = 1.5, CELL = 25, grid = new Map();
   keep.forEach(i=>{ const b = bx[i];
@@ -3769,6 +3864,16 @@ function pdfGroupViews(paths){
       const k = cx+','+cy; let arr = grid.get(k); if(!arr){ arr=[]; grid.set(k,arr); }
       for(const j of arr){ const c = bx[j]; if(b[0]-tol<=c[2] && b[2]+tol>=c[0] && b[1]-tol<=c[3] && b[3]+tol>=c[1]){ const a1=find(i), a2=find(j); if(a1!==a2) par[a1]=a2; } }
       arr.push(i); } });
+  // perçages isolés : un tracé fermé quasi circulaire situé à l'intérieur de l'encombrement d'un groupe est rattaché à ce groupe
+  const isCirc = i=>{ const p = paths[i], b = bx[i], w = b[2]-b[0], h = b[3]-b[1]; if(p.length<8 || w<1.2 || Math.abs(w-h)>0.06*Math.max(w,h)) return false;
+    if(Math.hypot(p[0].x-p[p.length-1].x, p[0].y-p[p.length-1].y)>0.3) return false; const cx=(b[0]+b[2])/2, cy=(b[1]+b[3])/2, r=w/2; return p.every(q=>Math.abs(Math.hypot(q.x-cx,q.y-cy)-r)<0.08*r+0.05); };
+  const cnt = {}; keep.forEach(i=>{ const r = find(i); cnt[r] = (cnt[r]||0)+1; });
+  const big = keep.filter(i=>cnt[find(i)]>=5);
+  keep.forEach(i=>{ if(cnt[find(i)]===1 && isCirc(i)){ const cx=(bx[i][0]+bx[i][2])/2, cy=(bx[i][1]+bx[i][3])/2;
+    let best = null, ba = Infinity; // plus petit groupe englobant
+    const gb = {}; big.forEach(j=>{ const r = find(j); const b = bx[j], g = gb[r] || (gb[r] = [Infinity,Infinity,-Infinity,-Infinity]); g[0]=Math.min(g[0],b[0]); g[1]=Math.min(g[1],b[1]); g[2]=Math.max(g[2],b[2]); g[3]=Math.max(g[3],b[3]); });
+    Object.keys(gb).forEach(r=>{ const g = gb[r], a = (g[2]-g[0])*(g[3]-g[1]); if(cx>g[0]&&cx<g[2]&&cy>g[1]&&cy<g[3] && a<ba){ ba = a; best = +r; } });
+    if(best!=null) par[find(i)] = find(best); } });
   const groups = new Map(); keep.forEach(i=>{ const r = find(i); let g = groups.get(r); if(!g){ g = { idx:[], x0:Infinity,y0:Infinity,x1:-Infinity,y1:-Infinity }; groups.set(r,g); } g.idx.push(i); const b=bx[i]; g.x0=Math.min(g.x0,b[0]); g.y0=Math.min(g.y0,b[1]); g.x1=Math.max(g.x1,b[2]); g.y1=Math.max(g.y1,b[3]); });
   return Array.from(groups.values()).map(g=>({ ...g, w:g.x1-g.x0, h:g.y1-g.y0 })).filter(g=>Math.max(g.w,g.h)>=20 && g.idx.length>=5).sort((a,b)=>b.w*b.h-a.w*a.h).slice(0,10);
 }
